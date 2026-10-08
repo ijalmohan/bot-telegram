@@ -8,7 +8,7 @@ import os
 import json
 import subprocess
 import time
-import receive_sms
+
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
