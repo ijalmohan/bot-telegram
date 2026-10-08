@@ -67,16 +67,13 @@ SUGGESTIONS_DB = GLOBAL_DB.setdefault("suggestions", [])
 BANNED_USERS_DB = GLOBAL_DB.setdefault("banned_users", [])
 ANONYMEET_BANS_DB = GLOBAL_DB.setdefault("anonymeet_bans", {})
 
-# Variabel Global untuk Anonymeet
 WAITING_ANONYMOUS_QUEUE = []
 ACTIVE_ANONYMOUS_CHATS = {} # user_id -> partner_id
 CHAT_HISTORY_LOGS = {} # user_id -> list of recent messages for AI report verification
 
-SPAM_ADULT_KEYWORDS = [
-    "porno", "kontol", "memek", "ngentot", "anjing", "babi", "colmek", "colok",
-    "bokep", "nsfw", "sex", "mahok", "pepek", "puki", "jembut",
-    "pantat", "titit", "gay", "lesbi", "open bo", "book", "vcs", "pap tt",
-    "pap memek", "desah", "desahan", "sange", "sangean", "horny", "pantek"
+STRICT_ADULT_KEYWORDS = [
+    "porno", "kontol", "memek", "ngentot", "colmek", "colok",
+    "bokep", "nsfw", "open bo", "vcs", "pap tt", "pap memek", "sangean"
 ]
 
 def is_admin(user_id: int) -> bool:
@@ -102,7 +99,7 @@ def is_anonymeet_banned(user_id: int) -> tuple[bool, int]:
 
 def ban_user_anonymeet(user_id: int, hours: int = 3):
     if is_admin(user_id):
-        return # Admin kebal hukum / sanksi
+        return # Admin mutlak kebal dari sanksi apa pun
     s_id = str(user_id)
     expire_time = time.time() + (hours * 3600)
     ANONYMEET_BANS_DB[s_id] = expire_time
@@ -251,6 +248,87 @@ async def check_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if is_banned(user_id): return
     await check_id_handler(update, update.effective_user)
 
+async def trigger_find_partner(bot, user_id, chat_obj):
+    is_banned_anon, sisa_detik = is_anonymeet_banned(user_id)
+    if is_banned_anon:
+        menit_sisa = int(sisa_detik // 60) + 1
+        await chat_obj.reply_text(f"❌ **Akses Anonymeet Ditangguhkan!**\nAnda diblokir dari fitur ini selama {menit_sisa} menit lagi.")
+        return
+
+    if user_id in WAITING_ANONYMOUS_QUEUE:
+        await chat_obj.reply_text("⏳ Anda sudah ada di antrean. Sedang mencari pasangan...")
+        return
+
+    if WAITING_ANONYMOUS_QUEUE:
+        partner_id = WAITING_ANONYMOUS_QUEUE.pop(0)
+        if partner_id == user_id:
+            WAITING_ANONYMOUS_QUEUE.append(user_id)
+            await chat_obj.reply_text("🚀 Sedang mencari pasangan untuk Anda...\nMohon tunggu sebentar.")
+            return
+
+        is_p_banned, _ = is_anonymeet_banned(partner_id)
+        if is_p_banned:
+            WAITING_ANONYMOUS_QUEUE.append(user_id)
+            await chat_obj.reply_text("🚀 Sedang mencarikan pasangan baru yang sesuai...")
+            return
+
+        ACTIVE_ANONYMOUS_CHATS[user_id] = partner_id
+        ACTIVE_ANONYMOUS_CHATS[partner_id] = user_id
+
+        CHAT_HISTORY_LOGS[user_id] = []
+        CHAT_HISTORY_LOGS[partner_id] = []
+
+        genders = ["Pria 👨", "Wanita 👩"]
+        gender_user = random.choice(genders)
+        gender_partner = "Pria 👨" if gender_user == "Wanita 👩" else "Wanita 👩"
+
+        # Tentukan penanda Admin/Owner jika salah satu adalah admin
+        if is_admin(user_id):
+            gender_partner = "Owner / Admin 👑"
+        if is_admin(partner_id):
+            gender_user = "Owner / Admin 👑"
+
+        admin_notice = GLOBAL_DB.get("admin_broadcast_text", "Selamat mengobrol!")
+
+        match_text_1 = (
+            f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
+            f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+            f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
+            f"• Partner Anda: `{gender_partner}`\n"
+            f"• Asal: `Indonesia 🇮🇩`\n\n"
+            f"💬 Silakan kirim pesan.\n"
+            f"• /next ➔ Langsung ganti pasangan baru\n"
+            f"• /report ➔ Laporkan pelanggaran\n"
+            f"• /stop ➔ Keluar obrolan"
+        )
+
+        match_text_2 = (
+            f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
+            f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+            f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
+            f"• Partner Anda: `{gender_user}`\n"
+            f"• Asal: `Indonesia 🇮🇩`\n\n"
+            f"💬 Silakan kirim pesan.\n"
+            f"• /next ➔ Langsung ganti pasangan baru\n"
+            f"• /report ➔ Laporkan pelanggaran\n"
+            f"• /stop ➔ Keluar obrolan"
+        )
+
+        await chat_obj.reply_text(match_text_1, parse_mode="Markdown")
+        try:
+            await bot.send_message(chat_id=partner_id, text=match_text_2, parse_mode="Markdown")
+        except Exception:
+            pass
+    else:
+        WAITING_ANONYMOUS_QUEUE.append(user_id)
+        admin_notice = GLOBAL_DB.get("admin_broadcast_text", "Selamat mengobrol!")
+        await chat_obj.reply_text(
+            f"🚀 **Sedang mencari pasangan anonim...**\n\n"
+            f"📢 **Info Admin:** *{admin_notice}*\n\n"
+            "Mohon tunggu beberapa saat.",
+            parse_mode="Markdown"
+        )
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user_id = query.from_user.id
@@ -263,91 +341,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if data == "anonymeet_start":
         await query.answer()
-        
-        is_banned_anon, sisa_detik = is_anonymeet_banned(user_id)
-        if is_banned_anon:
-            menit_sisa = int(sisa_detik // 60) + 1
-            await query.message.reply_text(f"❌ **Akses Anonymeet Ditangguhkan!**\nAnda melanggar aturan privasi/spam/18+. Anda diblokir dari fitur ini selama {menit_sisa} menit lagi.")
-            return
-
         if user_id in ACTIVE_ANONYMOUS_CHATS:
-            await query.message.reply_text("⚠️ Anda sedang terhubung dengan seseorang! Ketik /stop atau /report untuk mengakhiri percakapan terlebih dahulu.")
+            await query.message.reply_text("⚠️ Anda sedang terhubung dengan seseorang! Ketik /next, /stop, atau /report terlebih dahulu.")
             return
-
-        if user_id in WAITING_ANONYMOUS_QUEUE:
-            await query.message.reply_text("⏳ Anda sudah ada di antrean. Sedang mencari pasangan...")
-            return
-
-        if WAITING_ANONYMOUS_QUEUE:
-            partner_id = WAITING_ANONYMOUS_QUEUE.pop(0)
-            if partner_id == user_id:
-                WAITING_ANONYMOUS_QUEUE.append(user_id)
-                await query.message.reply_text("🚀 Sedang mencari pasangan untuk Anda...\nMohon tunggu sebentar.")
-                return
-
-            is_p_banned, _ = is_anonymeet_banned(partner_id)
-            if is_p_banned:
-                WAITING_ANONYMOUS_QUEUE.append(user_id)
-                await query.message.reply_text("🚀 Sedang mencarikan pasangan baru yang sesuai...")
-                return
-
-            ACTIVE_ANONYMOUS_CHATS[user_id] = partner_id
-            ACTIVE_ANONYMOUS_CHATS[partner_id] = user_id
-
-            # Reset history log untuk AI report checking
-            CHAT_HISTORY_LOGS[user_id] = []
-            CHAT_HISTORY_LOGS[partner_id] = []
-
-            # Tentukan gender acak secara adil (Pria / Wanita) untuk masing-masing
-            genders = ["Pria 👨", "Wanita 👩"]
-            gender_user = random.choice(genders)
-            gender_partner = "Pria 👨" if gender_user == "Wanita 👩" else "Wanita 👩"
-
-            # Ambil pesan kustom dari Admin
-            admin_notice = GLOBAL_DB.get("admin_broadcast_text", "Selamat mengobrol!")
-
-            match_text_1 = (
-                f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
-                f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
-                f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
-                f"• Gender Partner: `{gender_partner}`\n"
-                f"• Asal: `Indonesia 🇮🇩`\n\n"
-                f"💬 Silakan kirim pesan. Ketik /stop untuk keluar atau /report untuk melaporkan pelanggaran."
-            )
-
-            match_text_2 = (
-                f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
-                f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
-                f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
-                f"• Gender Partner: `{gender_user}`\n"
-                f"• Asal: `Indonesia 🇮🇩`\n\n"
-                f"💬 Silakan kirim pesan. Ketik /stop untuk keluar atau /report untuk melaporkan pelanggaran."
-            )
-
-            await query.message.reply_text(match_text_1, parse_mode="Markdown")
-            try:
-                await context.bot.send_message(chat_id=partner_id, text=match_text_2, parse_mode="Markdown")
-            except Exception:
-                pass
-        else:
-            WAITING_ANONYMOUS_QUEUE.append(user_id)
-            admin_notice = GLOBAL_DB.get("admin_broadcast_text", "Selamat mengobrol!")
-            await query.message.reply_text(
-                f"🚀 **Sedang mencari pasangan anonim...**\n\n"
-                f"📢 **Info Admin:** *{admin_notice}*\n\n"
-                "Mohon tunggu beberapa saat.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("❌ Batalkan Pencarian", callback_data="anonymeet_cancel")]
-                ]),
-                parse_mode="Markdown"
-            )
-        return
-
-    if data == "anonymeet_cancel":
-        await query.answer("Pencarian dibatalkan.")
-        if user_id in WAITING_ANONYMOUS_QUEUE:
-            WAITING_ANONYMOUS_QUEUE.remove(user_id)
-        await start(update, context)
+        await trigger_find_partner(context.bot, user_id, query.message)
         return
 
     if data == "set_admin_notice_menu":
@@ -705,31 +702,52 @@ async def stop_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         await update.message.reply_text("❌ Anda sedang tidak terhubung dalam percakapan anonim.")
 
+async def next_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id in ACTIVE_ANONYMOUS_CHATS:
+        partner_id = ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
+        if partner_id in ACTIVE_ANONYMOUS_CHATS:
+            ACTIVE_ANONYMOUS_CHATS.pop(partner_id, None)
+            try:
+                await context.bot.send_message(
+                    chat_id=partner_id,
+                    text="🔄 Pasangan Anda beralih ke sesi lain (Next).\nKetik /start atau /next untuk mencari pasangan baru."
+                )
+            except Exception:
+                pass
+
+    if user_id in WAITING_ANONYMOUS_QUEUE:
+        WAITING_ANONYMOUS_QUEUE.remove(user_id)
+
+    await update.message.reply_text("🔄 **Mencari pasangan baru...** Mohon tunggu sebentar.")
+    await trigger_find_partner(context.bot, user_id, update.message)
+
 async def report_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id not in ACTIVE_ANONYMOUS_CHATS:
+    if user_id not in ACTIVE_ANONYMOUS_CHATS and not is_admin(user_id):
         await update.message.reply_text("❌ Anda sedang tidak berada dalam sesi percakapan anonim untuk melakukan report.")
         return
 
-    partner_id = ACTIVE_ANONYMOUS_CHATS[user_id]
+    partner_id = ACTIVE_ANONYMOUS_CHATS.get(user_id)
+    if not partner_id:
+        await update.message.reply_text("❌ Tidak ada partner aktif yang ditemukan untuk dilaporkan.")
+        return
     
-    # Ambil riwayat chat partner untuk dianalisis oleh AI
     partner_logs = CHAT_HISTORY_LOGS.get(partner_id, [])
-    
-    status_msg = await update.message.reply_text("🤖 **Bot sedang menganalisis laporan & riwayat chat partner secara cerdas...** Mohon tunggu sebentar.")
+    status_msg = await update.message.reply_text("🤖 **Bot sedang memeriksa riwayat chat secara objektif & teliti...**")
 
     is_guilty = False
-    reason_text = "Pelanggaran aturan obrolan/18+/spam."
+    reason_text = "Tidak ditemukan pelanggaran nyata."
 
-    # Gunakan Groq/OpenAI untuk verifikasi cerdas apakah partner benar melanggar
     try:
         if GROQ_API_KEY and partner_logs:
             chat_context_str = "\n".join(partner_logs[-15:])
             prompt_ai = (
-                "Bertindaklah sebagai moderator bot Telegram profesional. Analisis apakah pesan-pesan berikut dari seorang pengguna "
-                "mengandung unsur asusila/18+, pornografi, pelecehan, spam berat, atau kata-kata kasar yang melanggar aturan.\n\n"
-                f"Pesan pengguna:\n{chat_context_str}\n\n"
-                "Jawab persis dengan format: YA atau TIDAK diikuti dengan alasan singkat."
+                "Anda adalah hakim moderasi bot Telegram yang sangat adil, objektif, dan cerdas. "
+                "Tugas Anda: Tentukan apakah teks chat berikut BENAR-BENAR mengandung unsur pornografi eksplisit kasar, penipuan, ancaman kekerasan, atau spam jualan.\n"
+                "PENTING: Percakapan santai, sapaan, gombalan biasa, candaan ringan, atau tanya kabar BUKANLAH pelanggaran sama sekali.\n\n"
+                f"Riwayat Chat Partner:\n{chat_context_str}\n\n"
+                "Jawab HANYA dengan format: YA [alasan singkat] jika itu adalah pelanggaran nyata/porno kasar, atau TIDAK [alasan singkat] jika itu obrolan normal/biasa."
             )
             completion = groq_client.chat.completions.create(
                 model="llama-3.1-8b-instant",
@@ -741,12 +759,13 @@ async def report_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 is_guilty = True
                 reason_text = ai_result
         else:
-            # Fallback jika tidak ada chat log, cek kata dasar
-            is_guilty = True
+            is_guilty = False
     except Exception:
-        is_guilty = True
+        is_guilty = False
 
-    # Jika terbukti bersalah dan partner bukan admin, hukum 3 jam
+    if is_admin(partner_id):
+        is_guilty = False
+
     if is_guilty:
         ban_user_anonymeet(partner_id, hours=3)
         ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
@@ -756,24 +775,23 @@ async def report_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         try:
             await context.bot.send_message(
                 chat_id=partner_id,
-                text="⚠️ **Laporan Divalidasi oleh AI Bot!**\nAnda terbukti melanggar aturan obrolan/18+/spam berdasarkan analisis chat. Akses Anonymeet Anda ditangguhkan selama 3 jam."
+                text="⚠️ **Laporan Terbukti!**\nAI mendapati adanya pelanggaran aturan obrolan/18+. Akses Anonymeet Anda ditangguhkan 3 jam."
             )
         except Exception:
             pass
 
         await status_msg.edit_text(
-            "✅ **Laporan Terbukti & Diterima!**\n"
-            f"• Analisis Bot: `{reason_text}`\n"
-            "• Sanksi: Partner telah diberikan hukuman blokir Anonymeet 3 jam dan sesi ditutup.",
+            "✅ **Laporan Diterima & Terbukti!**\n"
+            f"• Analisis: `{reason_text}`\n"
+            "• Partner telah diberi sanksi dan sesi ditutup.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 Cari Pasangan Baru", callback_data="anonymeet_start")]
             ])
         )
     else:
         await status_msg.edit_text(
-            "❌ **Laporan Ditolak oleh Sistem AI**\n"
-            "Berdasarkan analisis percakapan, partner Anda **tidak terbukti** melakukan pelanggaran aturan atau 18+.\n"
-            "Sesi obrolan tetap dilanjutkan.",
+            "❌ **Laporan Ditolak oleh Sistem AI!**\n"
+            "AI mendeteksi bahwa partner Anda **tidak melanggar aturan** (hanya obrolan normal/biasa). Tidak ada sanksi yang diberikan, sesi obrolan tetap dilanjutkan.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔴 Akhiri Sesi (/stop)", callback_data="anonymeet_cancel")]
             ])
@@ -786,7 +804,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = get_user_data(user_id)
     text = update.message.text.strip() if update.message.text else ""
 
-    # Atur kata kustom oleh Admin
     if user.get("waiting_custom_admin_notice"):
         user.pop("waiting_custom_admin_notice", None)
         GLOBAL_DB["admin_broadcast_text"] = text
@@ -801,24 +818,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Sesi Anonymeet Chat
     if user_id in ACTIVE_ANONYMOUS_CHATS:
         partner_id = ACTIVE_ANONYMOUS_CHATS[user_id]
 
         if text.lower() == "/stop":
             await stop_chat_cmd(update, context)
             return
+        if text.lower() == "/next":
+            await next_chat_cmd(update, context)
+            return
         if text.lower() == "/report":
             await report_chat_cmd(update, context)
             return
 
-        # Simpan log chat untuk analisis AI saat report
         if text:
             if user_id not in CHAT_HISTORY_LOGS:
                 CHAT_HISTORY_LOGS[user_id] = []
             CHAT_HISTORY_LOGS[user_id].append(text)
 
-        # Cek pelanggaran media/stiker/foto/video 18+ (Kecuali Admin)
         is_media_violation = update.message.photo or update.message.video or update.message.document or update.message.animation or update.message.sticker
         if is_media_violation and not is_admin(user_id):
             ban_user_anonymeet(user_id, hours=3)
@@ -833,9 +850,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 pass
             return
 
-        # Cek kata-kata terlarang / 18+ / spam (Kecuali Admin)
         lower_text = text.lower()
-        if any(keyword in lower_text for keyword in SPAM_ADULT_KEYWORDS) and not is_admin(user_id):
+        if any(keyword in lower_text for keyword in STRICT_ADULT_KEYWORDS) and not is_admin(user_id):
             ban_user_anonymeet(user_id, hours=3)
             ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
             if partner_id in ACTIVE_ANONYMOUS_CHATS:
@@ -848,7 +864,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 pass
             return
 
-        # Teruskan pesan secara murni anonim (Hanya teks, tanpa identitas)
         try:
             if update.message.text:
                 await context.bot.send_message(chat_id=partner_id, text=f"{text}")
@@ -942,7 +957,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("❌ Link tidak valid!")
             return
         status_msg = await update.message.reply_text("🎧 Mendownload dan mengonversi ke MP3 HD...")
-        # (Proses yt-dlp mp3 berjalan di sini)
         await status_msg.edit_text("✅ Fitur MP3 diproses.")
         return
 
@@ -1012,10 +1026,10 @@ async def addpoint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(f"❌ Error: {e}")
 
 async def post_init(application: Application) -> None:
-    # Mendaftarkan command agar muncul sebagai tombol biru otomatis di menu Telegram
     await application.bot.set_my_commands([
         BotCommand("start", "Mulai ulang / Menu Utama"),
         BotCommand("menu", "Tampilkan panel menu"),
+        BotCommand("next", "Langsung ganti pasangan baru"),
         BotCommand("stop", "Akhiri percakapan anonim"),
         BotCommand("report", "Laporkan partner & verifikasi AI"),
         BotCommand("id", "Cek ID Telegram Anda"),
@@ -1025,6 +1039,7 @@ def main() -> None:
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", start))
+    app.add_handler(CommandHandler("next", next_chat_cmd))
     app.add_handler(CommandHandler("stop", stop_chat_cmd))
     app.add_handler(CommandHandler("report", report_chat_cmd))
     app.add_handler(CommandHandler("id", check_id_cmd))
@@ -1037,7 +1052,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.ANIMATION | filters.Sticker.ALL, handle_message))
 
-    print("🤖 BOT ANONYMEET PRIVACY & AI SMART REPORT BERJALAN SEMPURNA!")
+    print("🤖 BOT ANONYMEET OWNER TAG, NEXT & AI SMART REPORT BERJALAN SEMPURNA!")
     app.run_polling()
 
 if __name__ == "__main__":
