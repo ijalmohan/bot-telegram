@@ -9,7 +9,6 @@ import json
 import subprocess
 import time
 
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.ext import (
     Application,
@@ -147,7 +146,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("❌ Akun Anda telah diblokir dari bot ini.")
         return
 
-    # Jika sedang dalam sesi anonymeet aktif, akhiri sesi saat ketik /start
     if user_id in ACTIVE_ANONYMOUS_CHATS:
         partner_id = ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
         if partner_id in ACTIVE_ANONYMOUS_CHATS:
@@ -247,7 +245,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_data(user_id)
     data = query.data
 
-    # Handler Fitur Anonymeet / GhostChat
     if data == "anonymeet_start":
         await query.answer()
         if user_id in ACTIVE_ANONYMOUS_CHATS:
@@ -258,16 +255,13 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await query.message.reply_text("⏳ Anda sudah ada di antrean. Sedang mencari pasangan...")
             return
 
-        # Cek apakah ada orang lain di antrean
         if WAITING_ANONYMOUS_QUEUE:
             partner_id = WAITING_ANONYMOUS_QUEUE.pop(0)
             if partner_id == user_id:
-                # Jaga-jaga jika ID sendiri
                 WAITING_ANONYMOUS_QUEUE.append(user_id)
                 await query.message.reply_text("🚀 Sedang mencari pasangan untuk Anda...\nMohon tunggu sebentar.")
                 return
 
-            # Hubungkan keduanya
             ACTIVE_ANONYMOUS_CHATS[user_id] = partner_id
             ACTIVE_ANONYMOUS_CHATS[partner_id] = user_id
 
@@ -687,20 +681,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = get_user_data(user_id)
     text = update.message.text.strip() if update.message.text else ""
 
-    # Cek apakah user sedang dalam sesi chat anonymeet aktif
     if user_id in ACTIVE_ANONYMOUS_CHATS:
         partner_id = ACTIVE_ANONYMOUS_CHATS[user_id]
         if text.lower() == "/stop":
             await stop_chat_cmd(update, context)
             return
         try:
-            # Meneruskan pesan ke partner secara anonim
             await context.bot.forward_message(chat_id=partner_id, from_chat_id=user_id, message_id=update.message.message_id)
         except Exception:
             await update.message.reply_text("❌ Gagal mengirim pesan ke partner. Partner mungkin telah keluar.")
         return
 
-    # Pengecekan state ID Telegram
     if user.get("waiting_telegram_id_input"):
         user.pop("waiting_telegram_id_input", None)
         if not text.isdigit():
@@ -1010,7 +1001,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             status_msg = await update.message.reply_text(
                 "🔥 **Mendownload Video 18+ ke Cloud Server...**\n\n"
                 f"• Link: `{text}`\n\n"
-                "⏳ Sedang mengunduh file video agar terhindar dari error 403..."
+                "⏳ Sedang mengunduh file video..."
             )
 
             output_template = f"adult_video_{user_id}_{random.randint(100,999)}.%(ext)s"
@@ -1052,19 +1043,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     "⏳ Membuat tautan unduhan instan..."
                 )
 
-                upload_cmd = [
-                    "curl", "-s", "-F", "reqtype=fileupload",
-                    "-F", f"fileToUpload=@{downloaded_file}",
-                    "https://catbox.moe/user/api.php"
-                ]
+                # Upload aman menggunakan aiohttp tanpa curl
+                data = aiohttp.FormData()
+                data.add_field('reqtype', 'fileupload')
+                data.add_field('fileToUpload', open(downloaded_file, 'rb'), filename=os.path.basename(downloaded_file))
 
-                up_process = await asyncio.create_subprocess_exec(
-                    *upload_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                up_stdout, up_stderr = await up_process.communicate()
-                cloud_link = up_stdout.decode().strip()
+                async with aiohttp.ClientSession() as session:
+                    async with session.post('https://catbox.moe/user/api.php', data=data) as resp:
+                        cloud_link = await resp.text()
+                        cloud_link = cloud_link.strip()
 
                 if not cloud_link.startswith("http"):
                     raise Exception("Gagal mengunggah file ke server cloud.")
@@ -1074,7 +1061,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(
                     f"✅ **LINK CLOUD 18+ SIAP DIBUKA!**\n\n"
                     f"🔗 `{cloud_link}`\n\n"
-                    f"*(Klik tombol di bawah untuk mendownload atau memutar video dengan lancar di Browser / Chrome)*",
+                    f"*(Klik tombol di bawah untuk mendownload atau memutar video dengan lancar di Browser)*",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🌐 Buka / Download di Browser", url=cloud_link)],
                         [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
