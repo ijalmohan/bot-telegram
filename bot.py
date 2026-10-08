@@ -24,18 +24,17 @@ from groq import Groq
 import openai
 
 # ==================== KONFIGURASI UTAMA ====================
-TOKEN = "8952334584:AAHxqHDPPRUeKpySpcTVqwFHBIKCMpJ-Uxk"
+TOKEN = os.getenv("TOKEN")
 ADMIN_ID = 5794869044
 ADMIN_USERNAME = "@Bymodz"
 
 ADMIN_IDS = [5794869044]
 PREMIUM_IDS = [5794869044]
 
-GROQ_API_KEY = "masuknanti"
-OPENAI_API_KEY = "sk-proj-Ip0oybohVLVPADbdu0WUF72cDkSvId51000U7qc"
-GEMINI_API_KEY = "masuknanti"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # ============================================================
-
 groq_client = Groq(api_key=GROQ_API_KEY)
 PUBLIC_NUMBERS = {"us": "12018577757", "uk": "447520635797", "se": "46769436266"}
 
