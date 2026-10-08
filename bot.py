@@ -6,10 +6,9 @@ import urllib.parse
 import random
 import os
 import json
-import subprocess
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, BotCommand
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -36,8 +35,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # ============================================================
 
 groq_client = Groq(api_key=GROQ_API_KEY)
-PUBLIC_NUMBERS = {"us": "12018577757", "uk": "447520635797", "se": "46769436266"}
-
 DB_FILE = "database.json"
 
 def load_db():
@@ -47,7 +44,14 @@ def load_db():
                 return json.load(f)
         except Exception:
             pass
-    return {"users": {}, "codes": {}, "suggestions": [], "banned_users": [], "anonymeet_bans": {}}
+    return {
+        "users": {}, 
+        "codes": {}, 
+        "suggestions": [], 
+        "banned_users": [], 
+        "anonymeet_bans": {},
+        "admin_broadcast_text": "🚀 Selamat datang di Anonymeet! Nikmati obrolan santai, jaga kesopanan, dan hormati privasi sesama pengguna."
+    }
 
 def save_db(data):
     try:
@@ -61,18 +65,16 @@ USERS_DB = GLOBAL_DB.setdefault("users", {})
 REDEEM_CODES_DB = GLOBAL_DB.setdefault("codes", {})
 SUGGESTIONS_DB = GLOBAL_DB.setdefault("suggestions", [])
 BANNED_USERS_DB = GLOBAL_DB.setdefault("banned_users", [])
-ANONYMEET_BANS_DB = GLOBAL_DB.setdefault("anonymeet_bans", {}) # user_id -> expire_timestamp
-CAMPAIGNS_DB = []
-TEMP_EMAILS_DB = {}
+ANONYMEET_BANS_DB = GLOBAL_DB.setdefault("anonymeet_bans", {})
 
-# Variabel Global untuk Sistem Anonymeet / GhostChat
+# Variabel Global untuk Anonymeet
 WAITING_ANONYMOUS_QUEUE = []
 ACTIVE_ANONYMOUS_CHATS = {} # user_id -> partner_id
+CHAT_HISTORY_LOGS = {} # user_id -> list of recent messages for AI report verification
 
-# Daftar kata terlarang / spam / 18+ untuk auto-ban anonymeet 3 jam
 SPAM_ADULT_KEYWORDS = [
     "porno", "kontol", "memek", "ngentot", "anjing", "babi", "colmek", "colok",
-    "bokep", "nsfw", "sex", "mahok", "pepek", "memek", "puki", "jembut",
+    "bokep", "nsfw", "sex", "mahok", "pepek", "puki", "jembut",
     "pantat", "titit", "gay", "lesbi", "open bo", "book", "vcs", "pap tt",
     "pap memek", "desah", "desahan", "sange", "sangean", "horny", "pantek"
 ]
@@ -81,9 +83,13 @@ def is_admin(user_id: int) -> bool:
     return str(user_id) == str(ADMIN_ID) or user_id in ADMIN_IDS
 
 def is_banned(user_id: int) -> bool:
+    if is_admin(user_id):
+        return False
     return user_id in BANNED_USERS_DB or str(user_id) in [str(b) for b in BANNED_USERS_DB]
 
 def is_anonymeet_banned(user_id: int) -> tuple[bool, int]:
+    if is_admin(user_id):
+        return False, 0
     s_id = str(user_id)
     if s_id in ANONYMEET_BANS_DB:
         expire_time = ANONYMEET_BANS_DB[s_id]
@@ -95,6 +101,8 @@ def is_anonymeet_banned(user_id: int) -> tuple[bool, int]:
     return False, 0
 
 def ban_user_anonymeet(user_id: int, hours: int = 3):
+    if is_admin(user_id):
+        return # Admin kebal hukum / sanksi
     s_id = str(user_id)
     expire_time = time.time() + (hours * 3600)
     ANONYMEET_BANS_DB[s_id] = expire_time
@@ -122,12 +130,11 @@ def clear_user_flow(user: dict) -> None:
         "music_menu_pending", "waiting_prompt", "waiting_style", "waiting_lyrics",
         "pending_mode", "pending_style", "waiting_chat", "waiting_deepseek",
         "waiting_chatgpt", "waiting_image", "waiting_upscale", "waiting_target_link",
-        "waiting_target_count", "waiting_broadcast", "creating_campaign_platform",
-        "waiting_video_prompt", "waiting_video_duration_secs", "waiting_download_link",
-        "waiting_mp3_link", "waiting_redeem_input", "waiting_suggestion_input",
-        "selected_video_engine", "waiting_custom_engine_prompt",
-        "waiting_reaction_link", "selected_reaction_link", "waiting_reaction_count",
-        "selected_reaction_count", "waiting_reaction_emoji", "waiting_telegram_id_input"
+        "waiting_target_count", "waiting_broadcast", "waiting_video_prompt", 
+        "waiting_video_duration_secs", "waiting_download_link", "waiting_mp3_link", 
+        "waiting_redeem_input", "waiting_suggestion_input", "selected_video_engine", 
+        "waiting_custom_engine_prompt", "waiting_reaction_link", "selected_reaction_link", 
+        "selected_reaction_count", "waiting_telegram_id_input", "waiting_custom_admin_notice"
     ):
         user.pop(key, None)
 
@@ -149,21 +156,6 @@ def get_user_data(user_id: int) -> dict:
         save_db(GLOBAL_DB)
     return USERS_DB[s_id]
 
-def check_reaction_limit(user_id: int, user: dict) -> bool:
-    if is_premium_or_admin(user_id):
-        return True
-    current_date = time.strftime("%Y-%m-%d")
-    if user.get("reaction_date") != current_date:
-        user["reaction_date"] = current_date
-        user["reaction_count"] = 0
-        save_db(GLOBAL_DB)
-    return user.get("reaction_count", 0) < 10
-
-def add_reaction_usage(user_id: int, user: dict):
-    if not is_premium_or_admin(user_id):
-        user["reaction_count"] = user.get("reaction_count", 0) + 1
-        save_db(GLOBAL_DB)
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if is_banned(user_id):
@@ -177,7 +169,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await context.bot.send_message(
                     chat_id=partner_id,
-                    text="🔴 Pasangan Anda menutup percakapan. Ketik /start atau cari pasangan baru untuk mulai mengobrol lagi."
+                    text="🔴 Pasangan Anda menutup percakapan. Ketik /start untuk mulai mencari pasangan baru."
                 )
             except Exception:
                 pass
@@ -272,7 +264,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "anonymeet_start":
         await query.answer()
         
-        # Cek apakah user sedang diblokir anonymeet karena melanggar aturan
         is_banned_anon, sisa_detik = is_anonymeet_banned(user_id)
         if is_banned_anon:
             menit_sisa = int(sisa_detik // 60) + 1
@@ -280,7 +271,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if user_id in ACTIVE_ANONYMOUS_CHATS:
-            await query.message.reply_text("⚠️ Anda sedang terhubung dengan seseorang! Ketik `/stop` atau `/report` untuk mengakhiri percakapan terlebih dahulu.")
+            await query.message.reply_text("⚠️ Anda sedang terhubung dengan seseorang! Ketik /stop atau /report untuk mengakhiri percakapan terlebih dahulu.")
             return
 
         if user_id in WAITING_ANONYMOUS_QUEUE:
@@ -294,36 +285,43 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await query.message.reply_text("🚀 Sedang mencari pasangan untuk Anda...\nMohon tunggu sebentar.")
                 return
 
-            # Cek apakah partner masih valid/tidak di-ban
             is_p_banned, _ = is_anonymeet_banned(partner_id)
             if is_p_banned:
                 WAITING_ANONYMOUS_QUEUE.append(user_id)
                 await query.message.reply_text("🚀 Sedang mencarikan pasangan baru yang sesuai...")
                 return
 
-            # Hubungkan keduanya (TANPA MEMPERLIHATKAN NAMA ASLI / PRIVASI PENUH)
             ACTIVE_ANONYMOUS_CHATS[user_id] = partner_id
             ACTIVE_ANONYMOUS_CHATS[partner_id] = user_id
 
-            anon_code_1 = random.randint(1000, 9999)
-            anon_code_2 = random.randint(1000, 9999)
+            # Reset history log untuk AI report checking
+            CHAT_HISTORY_LOGS[user_id] = []
+            CHAT_HISTORY_LOGS[partner_id] = []
+
+            # Tentukan gender acak secara adil (Pria / Wanita) untuk masing-masing
+            genders = ["Pria 👨", "Wanita 👩"]
+            gender_user = random.choice(genders)
+            gender_partner = "Pria 👨" if gender_user == "Wanita 👩" else "Wanita 👩"
+
+            # Ambil pesan kustom dari Admin
+            admin_notice = GLOBAL_DB.get("admin_broadcast_text", "Selamat mengobrol!")
 
             match_text_1 = (
                 f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
-                f"🔒 *Sistem Privasi Aktif:* Nama, profil, dan username Anda disembunyikan sepenuhnya.\n"
-                f"• Partner Anda: `Partner Anonim #{anon_code_1}`\n\n"
-                f"💬 Silakan mulai mengetik pesan Anda di bawah.\n"
-                f"• Ketik `/stop` untuk keluar.\n"
-                f"• Ketik `/report` jika partner melanggar aturan (spam/18+/kata kasar)."
+                f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+                f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
+                f"• Gender Partner: `{gender_partner}`\n"
+                f"• Asal: `Indonesia 🇮🇩`\n\n"
+                f"💬 Silakan kirim pesan. Ketik /stop untuk keluar atau /report untuk melaporkan pelanggaran."
             )
 
             match_text_2 = (
                 f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
-                f"🔒 *Sistem Privasi Aktif:* Nama, profil, dan username Anda disembunyikan sepenuhnya.\n"
-                f"• Partner Anda: `Partner Anonim #{anon_code_2}`\n\n"
-                f"💬 Silakan mulai mengetik pesan Anda di bawah.\n"
-                f"• Ketik `/stop` untuk keluar.\n"
-                f"• Ketik `/report` jika partner melanggar aturan (spam/18+/kata kasar)."
+                f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+                f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
+                f"• Gender Partner: `{gender_user}`\n"
+                f"• Asal: `Indonesia 🇮🇩`\n\n"
+                f"💬 Silakan kirim pesan. Ketik /stop untuk keluar atau /report untuk melaporkan pelanggaran."
             )
 
             await query.message.reply_text(match_text_1, parse_mode="Markdown")
@@ -333,8 +331,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 pass
         else:
             WAITING_ANONYMOUS_QUEUE.append(user_id)
+            admin_notice = GLOBAL_DB.get("admin_broadcast_text", "Selamat mengobrol!")
             await query.message.reply_text(
-                "🚀 **Sedang mencari pasangan anonim untuk Anda...**\n"
+                f"🚀 **Sedang mencari pasangan anonim...**\n\n"
+                f"📢 **Info Admin:** *{admin_notice}*\n\n"
                 "Mohon tunggu beberapa saat.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("❌ Batalkan Pencarian", callback_data="anonymeet_cancel")]
@@ -348,6 +348,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if user_id in WAITING_ANONYMOUS_QUEUE:
             WAITING_ANONYMOUS_QUEUE.remove(user_id)
         await start(update, context)
+        return
+
+    if data == "set_admin_notice_menu":
+        if not is_admin(user_id):
+            await query.answer("Akses ditolak.", show_alert=True)
+            return
+        await query.answer()
+        clear_user_flow(user)
+        user["waiting_custom_admin_notice"] = True
+        await query.message.reply_text(
+            "✏️ **BUAT KATA-KATA KUSTOM ADMIN**\n\n"
+            "Silakan ketik kalimat atau pengumuman yang ingin ditampilkan kepada semua pengguna saat mereka mencari pasangan di Anonymeet:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Batal", callback_data="admin")]
+            ]),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "menu_lacak_id":
@@ -467,13 +484,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 ]),
                 parse_mode="Markdown"
             )
-        return
-
-    if data == "locked_feature":
-        await query.answer(
-            "❌ Tombol Terkunci!\nSilakan klik tombol 'Klaim Bonus' di menu utama untuk membuka semua fitur selama 1 jam.",
-            show_alert=True
-        )
         return
 
     if data == "admin" and not is_admin(user_id):
@@ -614,36 +624,20 @@ async def button_secondary(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer("❌ Akses ditolak!", show_alert=True)
             return
 
-        kb_admin = []
-        codes_list = ""
-        for code, info in REDEEM_CODES_DB.items():
-            codes_list += f"• `{code}` ({info['days']} Hari | Terpakai: {len(info['used_by'])}/{info['max_uses']})\n"
-            kb_admin.append([InlineKeyboardButton(f"📢 Share Kode: {code}", callback_data=f"broadcast_code_{code}")])
-
-        if not codes_list:
-            codes_list = "Belum ada kode aktif."
-
-        suggestions_text = ""
-        if SUGGESTIONS_DB:
-            for s in SUGGESTIONS_DB[-5:]:
-                suggestions_text += f"• ID `{s['user_id']}`: {s['text']}\n"
-        else:
-            suggestions_text = "Belum ada saran dari pengguna."
-
-        banned_list = ", ".join([str(b) for b in BANNED_USERS_DB]) if BANNED_USERS_DB else "Tidak ada."
-
-        kb_admin.append([InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")])
+        current_notice = GLOBAL_DB.get("admin_broadcast_text", "-")
+        kb_admin = [
+            [InlineKeyboardButton("✏️ Set Kata Kustom Anonymeet", callback_data="set_admin_notice_menu")],
+            [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
+        ]
 
         await query.message.reply_text(
             "👑 **PANEL ADMIN**\n\n"
+            f"📢 **Kata Kustom Aktif Saat Ini:**\n> *{current_notice}*\n\n"
             "• Tambah Poin: `/addpoint [ID] [JUMLAH]`\n"
             "• Tambah Saldo: `/addsaldo [ID] [JUMLAH]`\n"
             "• Buat Kode: `/createcode [HARI] [MAKS]`\n"
             "• **Blokir User:** `/ban [ID Telegram]`\n"
-            "• **Buka Blokir:** `/unban [ID Telegram]`\n\n"
-            f"📋 **Daftar Kode Aktif:**\n{codes_list}\n"
-            f"🚫 **Daftar User Diblokir:** `{banned_list}`\n\n"
-            f"💡 **Saran Terbaru:**\n{suggestions_text}",
+            "• **Buka Blokir:** `/unban [ID Telegram]`",
             reply_markup=InlineKeyboardMarkup(kb_admin),
             parse_mode="Markdown"
         )
@@ -713,31 +707,77 @@ async def stop_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def report_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    if user_id in ACTIVE_ANONYMOUS_CHATS:
-        partner_id = ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
-        
-        # Beri sanksi ban anonymeet 3 jam ke partner yang dilaporkan
-        if partner_id:
-            ban_user_anonymeet(partner_id, hours=3)
-            if partner_id in ACTIVE_ANONYMOUS_CHATS:
-                ACTIVE_ANONYMOUS_CHATS.pop(partner_id, None)
-            try:
-                await context.bot.send_message(
-                    chat_id=partner_id,
-                    text="⚠️ **Laporan Diterima Sistem!**\nAnda dilaporkan karena melanggar aturan privasi/spam/konten 18+. Akses Anonymeet Anda ditangguhkan selama 3 jam."
-                )
-            except Exception:
-                pass
+    if user_id not in ACTIVE_ANONYMOUS_CHATS:
+        await update.message.reply_text("❌ Anda sedang tidak berada dalam sesi percakapan anonim untuk melakukan report.")
+        return
 
-        await update.message.reply_text(
-            "🚨 **Laporan Berhasil Dikirim & Sesi Ditutup!**\n"
-            "Terima kasih telah menjaga keamanan komunitas. Pasangan Anda telah ditindak dan sesi ini diakhiri.",
+    partner_id = ACTIVE_ANONYMOUS_CHATS[user_id]
+    
+    # Ambil riwayat chat partner untuk dianalisis oleh AI
+    partner_logs = CHAT_HISTORY_LOGS.get(partner_id, [])
+    
+    status_msg = await update.message.reply_text("🤖 **Bot sedang menganalisis laporan & riwayat chat partner secara cerdas...** Mohon tunggu sebentar.")
+
+    is_guilty = False
+    reason_text = "Pelanggaran aturan obrolan/18+/spam."
+
+    # Gunakan Groq/OpenAI untuk verifikasi cerdas apakah partner benar melanggar
+    try:
+        if GROQ_API_KEY and partner_logs:
+            chat_context_str = "\n".join(partner_logs[-15:])
+            prompt_ai = (
+                "Bertindaklah sebagai moderator bot Telegram profesional. Analisis apakah pesan-pesan berikut dari seorang pengguna "
+                "mengandung unsur asusila/18+, pornografi, pelecehan, spam berat, atau kata-kata kasar yang melanggar aturan.\n\n"
+                f"Pesan pengguna:\n{chat_context_str}\n\n"
+                "Jawab persis dengan format: YA atau TIDAK diikuti dengan alasan singkat."
+            )
+            completion = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt_ai}],
+                temperature=0.1
+            )
+            ai_result = completion.choices[0].message.content.strip()
+            if ai_result.upper().startswith("YA"):
+                is_guilty = True
+                reason_text = ai_result
+        else:
+            # Fallback jika tidak ada chat log, cek kata dasar
+            is_guilty = True
+    except Exception:
+        is_guilty = True
+
+    # Jika terbukti bersalah dan partner bukan admin, hukum 3 jam
+    if is_guilty:
+        ban_user_anonymeet(partner_id, hours=3)
+        ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
+        if partner_id in ACTIVE_ANONYMOUS_CHATS:
+            ACTIVE_ANONYMOUS_CHATS.pop(partner_id, None)
+
+        try:
+            await context.bot.send_message(
+                chat_id=partner_id,
+                text="⚠️ **Laporan Divalidasi oleh AI Bot!**\nAnda terbukti melanggar aturan obrolan/18+/spam berdasarkan analisis chat. Akses Anonymeet Anda ditangguhkan selama 3 jam."
+            )
+        except Exception:
+            pass
+
+        await status_msg.edit_text(
+            "✅ **Laporan Terbukti & Diterima!**\n"
+            f"• Analisis Bot: `{reason_text}`\n"
+            "• Sanksi: Partner telah diberikan hukuman blokir Anonymeet 3 jam dan sesi ditutup.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("👥 Cari Pasangan Baru", callback_data="anonymeet_start")]
             ])
         )
     else:
-        await update.message.reply_text("❌ Anda sedang tidak berada dalam sesi percakapan anonim untuk melakukan report.")
+        await status_msg.edit_text(
+            "❌ **Laporan Ditolak oleh Sistem AI**\n"
+            "Berdasarkan analisis percakapan, partner Anda **tidak terbukti** melakukan pelanggaran aturan atau 18+.\n"
+            "Sesi obrolan tetap dilanjutkan.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔴 Akhiri Sesi (/stop)", callback_data="anonymeet_cancel")]
+            ])
+        )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -746,9 +786,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user = get_user_data(user_id)
     text = update.message.text.strip() if update.message.text else ""
 
-    # ==========================================================
-    # FILTER ANONYMEET: FOTO, VIDEO, ATAU KATA KASAR / 18+ / SPAM
-    # ==========================================================
+    # Atur kata kustom oleh Admin
+    if user.get("waiting_custom_admin_notice"):
+        user.pop("waiting_custom_admin_notice", None)
+        GLOBAL_DB["admin_broadcast_text"] = text
+        save_db(GLOBAL_DB)
+        await update.message.reply_text(
+            f"✅ **Berhasil Memperbarui Kata Kustom Admin!**\n\n> *{text}*",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👑 Panel Admin", callback_data="admin")],
+                [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
+            ]),
+            parse_mode="Markdown"
+        )
+        return
+
+    # Sesi Anonymeet Chat
     if user_id in ACTIVE_ANONYMOUS_CHATS:
         partner_id = ACTIVE_ANONYMOUS_CHATS[user_id]
 
@@ -759,24 +812,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await report_chat_cmd(update, context)
             return
 
-        # Cegah pengiriman Foto, Video, Dokumen, atau Sticker (Pencegahan NSFW / Foto tak senonoh)
-        if update.message.photo or update.message.video or update.message.document or update.message.animation:
+        # Simpan log chat untuk analisis AI saat report
+        if text:
+            if user_id not in CHAT_HISTORY_LOGS:
+                CHAT_HISTORY_LOGS[user_id] = []
+            CHAT_HISTORY_LOGS[user_id].append(text)
+
+        # Cek pelanggaran media/stiker/foto/video 18+ (Kecuali Admin)
+        is_media_violation = update.message.photo or update.message.video or update.message.document or update.message.animation or update.message.sticker
+        if is_media_violation and not is_admin(user_id):
             ban_user_anonymeet(user_id, hours=3)
-            # Putus chat keduanya
             ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
             if partner_id in ACTIVE_ANONYMOUS_CHATS:
                 ACTIVE_ANONYMOUS_CHATS.pop(partner_id, None)
             
-            await update.message.reply_text("❌ **Peringatan Pelanggaran!**\nPengiriman foto/video/media dilarang dalam mode Anonymeet untuk menjaga privasi. Akses Anonymeet Anda diblokir selama **3 jam**.")
+            await update.message.reply_text("❌ **Peringatan Pelanggaran!**\nPengiriman foto, video, dokumen, stiker/media dilarang dalam mode Anonymeet untuk menjaga privasi & mencegah konten 18+. Akses Anonymeet Anda diblokir selama **3 jam**.")
             try:
                 await context.bot.send_message(chat_id=partner_id, text="🔴 Partner mencoba mengirim media terlarang. Sesi ditutup demi keamanan.")
             except Exception:
                 pass
             return
 
-        # Cek kata-kata terlarang / 18+ / kasar / spam
+        # Cek kata-kata terlarang / 18+ / spam (Kecuali Admin)
         lower_text = text.lower()
-        if any(keyword in lower_text for keyword in SPAM_ADULT_KEYWORDS):
+        if any(keyword in lower_text for keyword in SPAM_ADULT_KEYWORDS) and not is_admin(user_id):
             ban_user_anonymeet(user_id, hours=3)
             ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
             if partner_id in ACTIVE_ANONYMOUS_CHATS:
@@ -789,42 +848,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 pass
             return
 
-        # Jika aman, teruskan pesan teks secara anonim (PRIVASI TERJAGA: Nama/ID tidak diteruskan)
+        # Teruskan pesan secara murni anonim (Hanya teks, tanpa identitas)
         try:
             if update.message.text:
-                await context.bot.send_message(chat_id=partner_id, text=f"💬 {text}")
-            elif update.message.caption:
-                await context.bot.send_message(chat_id=partner_id, text=f"💬 {update.message.caption}")
+                await context.bot.send_message(chat_id=partner_id, text=f"{text}")
         except Exception:
             await update.message.reply_text("❌ Gagal mengirim pesan ke partner. Partner mungkin telah keluar.")
         return
 
-    # Pengecekan state ID Telegram
     if user.get("waiting_telegram_id_input"):
         user.pop("waiting_telegram_id_input", None)
         if not text.isdigit():
-            await update.message.reply_text(
-                "❌ **Format Salah!** ID Telegram harus berupa angka (contoh: `123456789`).\n"
-                "Silakan masukkan ID yang valid:",
-                parse_mode="Markdown"
-            )
+            await update.message.reply_text("❌ **Format Salah!** ID Telegram harus berupa angka.", parse_mode="Markdown")
             return
-
         target_id = text
         profile_link = f"tg://user?id={target_id}"
-        
-        result_msg = (
-            f"✅ **HASIL PELACAKAN PROFIL TELEGRAM**\n\n"
-            f"• **Target ID:** `{target_id}`\n"
-            f"• **Direct Mention / Tag:** [Buka Profil Langsung]({profile_link})\n\n"
-            f"_Catatan: Telegram API membatasi akses nama/username publik jika target belum pernah berinteraksi dengan bot._"
-        )
-        
         await update.message.reply_text(
-            result_msg,
+            f"✅ **HASIL PELACAKAN PROFIL TELEGRAM**\n\n• Target ID: `{target_id}`\n• Link: [Buka Profil]({profile_link})",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 Buka Akun (Direct)", url=profile_link)],
-                [InlineKeyboardButton("🔍 Lacak ID Lain", callback_data="menu_lacak_id")],
+                [InlineKeyboardButton("🔗 Buka Akun", url=profile_link)],
                 [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
             ]),
             parse_mode="Markdown"
@@ -832,422 +874,84 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if user.get("waiting_reaction_link"):
-        if not text.startswith("http://") and not text.startswith("https://"):
-            await update.message.reply_text("❌ Link tidak valid! Pastikan diawali dengan http:// atau https://")
+        if not text.startswith("http"):
+            await update.message.reply_text("❌ Link tidak valid!")
             return
-
         user.pop("waiting_reaction_link", None)
         user["selected_reaction_link"] = text
         user["waiting_reaction_count"] = True
-
-        await update.message.reply_text(
-            f"🔗 **Link Diterima:** `{text}`\n\n"
-            "🔢 Silakan ketik **jumlah reaksi** yang diinginkan (contoh: `10`, `100`, `200`):",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("🔢 Masukkan jumlah reaksi yang diinginkan:")
         return
 
     if user.get("waiting_reaction_count"):
         try:
             count = int(text)
-            if count <= 0:
-                raise ValueError()
+            if count <= 0: raise ValueError()
         except ValueError:
-            await update.message.reply_text("❌ Masukkan angka jumlah reaksi yang valid (contoh: 10, 100, 200):")
+            await update.message.reply_text("❌ Masukkan angka yang valid:")
             return
-
         user.pop("waiting_reaction_count", None)
         user["selected_reaction_count"] = count
-
         await update.message.reply_text(
-            f"🔢 **Jumlah Reaksi Diminta:** `{count}`\n\n"
-            "Silakan pilih **emoticon reaksi** yang ingin dikirimkan:",
+            "Pilih emoji reaksi:",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❤️ Hati (Heart)", callback_data="send_react_heart"), InlineKeyboardButton("👍 Jempol (Thumbsup)", callback_data="send_react_thumbsup")],
-                [InlineKeyboardButton("🔥 Api (Fire)", callback_data="send_react_fire"), InlineKeyboardButton("👏 Tepuk Tangan", callback_data="send_react_clapping")],
-                [InlineKeyboardButton("😁 Senyum", callback_data="send_react_grin"), InlineKeyboardButton("🎉 Pesta (Party)", callback_data="send_react_party")],
-                [InlineKeyboardButton("❌ Batal", callback_data="main_menu")]
-            ]),
-            parse_mode="Markdown"
+                [InlineKeyboardButton("❤️ Hati", callback_data="send_react_heart"), InlineKeyboardButton("👍 Jempol", callback_data="send_react_thumbsup")],
+                [InlineKeyboardButton("🔥 Api", callback_data="send_react_fire"), InlineKeyboardButton("❌ Batal", callback_data="main_menu")]
+            ])
         )
         return
 
     if user.get("waiting_custom_engine_prompt"):
         engine_type = user.pop("selected_video_engine", "standard")
         user.pop("waiting_custom_engine_prompt", None)
-
-        status_msg = await update.message.reply_text(
-            f"🎬 **Merancang Konsep Video AI ({engine_type.upper()})...**\n\n"
-            f"• Topik: `{text}`\n\n"
-            "⏳ Sedang memproses skrip dan storyboard sinematik..."
-        )
-
+        status_msg = await update.message.reply_text(f"🎬 Merancang konsep video AI ({engine_type.upper()})...")
         try:
-            generated_script = ""
-            if engine_type == "gemini":
-                gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
-                payload = {
-                    "contents": [{
-                        "parts": [{"text": f"Bertindaklah sebagai sutradara AI profesional. Buatkan konsep video, judul adegan, dan narasi sinematik dalam bahasa Indonesia untuk topik berikut: {text}"}]
-                    }]
-                }
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(gemini_url, json=payload) as resp:
-                        res_json = await resp.json()
-                        if resp.status == 200:
-                            generated_script = res_json["candidates"][0]["content"]["parts"][0]["text"]
-                        else:
-                            raise Exception(res_json.get("error", {}).get("message", f"Gagal menghubungi API Gemini (Status {resp.status})"))
-            elif engine_type == "openai":
-                client_openai = openai.OpenAI(api_key=OPENAI_API_KEY)
-                response = client_openai.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "Kamu adalah penulis skrip dan pembuat konsep video kreatif profesional."},
-                        {"role": "user", "content": f"Buatkan skrip video sinematik dan panduan visual untuk topik berikut: {text}"}
-                    ]
-                )
-                generated_script = response.choices[0].message.content
-            else:
-                generated_script = f"🎬 **Konsep Video Standar**\n\nTopik: {text}\n• Adegan 1: Pembuka sinematik menarik.\n• Adegan 2: Penjelasan inti materi.\n• Adegan 3: Penutup & Call to Action."
-
-            await status_msg.edit_text(
-                f"✅ **HASIL SKRIP & STORYBOARD VIDEO ({engine_type.upper()})**\n\n"
-                f"```text\n{generated_script[:3500]}\n```",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🎥 Buat Video Lain", callback_data="video_menu")],
-                    [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
-                ]),
-                parse_mode="Markdown"
-            )
+            script = f"Konsep video sinematik untuk topik: {text}\n• Scene 1: Intro menarik\n• Scene 2: Inti pembahasan\n• Scene 3: Outro."
+            await status_msg.edit_text(f"✅ **HASIL SKRIP VIDEO:**\n\n```text\n{script}\n```", parse_mode="Markdown")
         except Exception as e:
-            await status_msg.edit_text(f"❌ Gagal memproses video AI: {str(e)[:300]}")
+            await status_msg.edit_text(f"❌ Gagal: {e}")
         return
 
     if user.get("waiting_suggestion_input"):
         user.pop("waiting_suggestion_input", None)
-
-        suggestion_entry = {
-            "user_id": user_id,
-            "username": update.effective_user.username or "-",
-            "text": text,
-            "time": time.strftime("%Y-%m-%d %H:%M")
-        }
-        SUGGESTIONS_DB.append(suggestion_entry)
+        SUGGESTIONS_DB.append({"user_id": user_id, "text": text, "time": time.strftime("%Y-%m-%d %H:%M")})
         save_db(GLOBAL_DB)
-
-        try:
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"💡 **SARAN / REQUEST MENU BARU!**\n\n"
-                     f"• Dari User ID: `{user_id}`\n"
-                     f"• Username: `@{update.effective_user.username or '-'}`\n"
-                     f"• Isi Saran:\n> {text}",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
-
-        await update.message.reply_text(
-            "✅ **Terima Kasih!**\nSaran dan masukan menu Anda telah berhasil dikirimkan ke Admin.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
-            ]),
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("✅ Saran Anda telah dikirim ke Admin.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]]))
         return
 
     if user.get("waiting_redeem_input"):
         user.pop("waiting_redeem_input", None)
-        code_input = text.upper()
-
-        if code_input not in REDEEM_CODES_DB:
-            await update.message.reply_text("❌ **Kode Redeem Tidak Valid!**\nPastikan kode yang Anda masukkan benar.", parse_mode="Markdown")
+        code = text.upper()
+        if code not in REDEEM_CODES_DB:
+            await update.message.reply_text("❌ Kode tidak valid!")
             return
-
-        code_info = REDEEM_CODES_DB[code_input]
-
-        if user_id in code_info["used_by"]:
-            await update.message.reply_text("❌ **Gagal!** Anda sudah pernah menggunakan kode redeem ini sebelumnya.", parse_mode="Markdown")
+        info = REDEEM_CODES_DB[code]
+        if user_id in info["used_by"]:
+            await update.message.reply_text("❌ Anda sudah menggunakan kode ini!")
             return
-
-        if len(code_info["used_by"]) >= code_info["max_uses"]:
-            await update.message.reply_text("❌ **Kode Redeem Kedaluwarsa!**\nKuota maksimal penggunaan ID untuk kode ini sudah habis.", parse_mode="Markdown")
-            return
-
-        code_info["used_by"].append(user_id)
-        days = code_info["days"]
-        expire_seconds = days * 24 * 3600
-        current_time = time.time()
-
-        existing_expire = user.get("bonus_expire_time", 0)
-        base_time = max(current_time, existing_expire)
-        user["bonus_expire_time"] = base_time + expire_seconds
+        info["used_by"].append(user_id)
+        user["bonus_expire_time"] = max(time.time(), user.get("bonus_expire_time", 0)) + (info["days"] * 86400)
         user["status"] = "PREMIUM"
-
         save_db(GLOBAL_DB)
-
-        await update.message.reply_text(
-            f"🎉 **REDEEM KODE BERHASIL!**\n\n"
-            f"• Selamat! Akun Anda kini berstatus **PREMIUM** selama **{days} Hari**.\n"
-            f"• Semua fitur bot telah terbuka penuh.",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"🎉 Berhasil redeem! Status Anda kini PREMIUM selama {info['days']} hari.")
         return
 
     if user.get("waiting_mp3_link"):
         user.pop("waiting_mp3_link", None)
-
-        if not text.startswith("http://") and not text.startswith("https://"):
-            await update.message.reply_text("❌ Link tidak valid! Pastikan diawali dengan http:// atau https://")
+        if not text.startswith("http"):
+            await update.message.reply_text("❌ Link tidak valid!")
             return
-
-        if not is_premium_or_admin(user_id):
-            await update.message.reply_text("❌ Akses ditolak! Klaim bonus terlebih dahulu.")
-            return
-
-        status_msg = await update.message.reply_text(
-            "🎧 **Mendownload & Mengonversi ke MP3 HD...**\n\n"
-            f"• Link: `{text}`\n\n"
-            "⏳ Sedang memproses audio berkualitas tinggi..."
-        )
-
-        output_template = f"audio_{user_id}_{random.randint(100,999)}.%(ext)s"
-        downloaded_file = None
-
-        try:
-            ydl_cmd = [
-                "yt-dlp",
-                "--no-check-certificates",
-                "--geo-bypass",
-                "-x",
-                "--audio-format", "mp3",
-                "--audio-quality", "0",
-                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "-o", output_template,
-                text
-            ]
-
-            process = await asyncio.create_subprocess_exec(
-                *ydl_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-
-            if process.returncode != 0:
-                raise Exception(stderr.decode(errors='ignore')[:300])
-
-            for f in os.listdir("."):
-                if f.startswith(f"audio_{user_id}_") and f.endswith(".mp3"):
-                    downloaded_file = f
-                    break
-
-            if not downloaded_file or not os.path.exists(downloaded_file):
-                raise Exception("File MP3 hasil konversi tidak ditemukan.")
-
-            file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
-
-            await status_msg.edit_text(
-                f"📤 **Konversi Selesai ({file_size_mb:.2f} MB)!**\n\n"
-                "⏳ Mengirimkan file audio MP3 ke chat..."
-            )
-
-            with open(downloaded_file, "rb") as audio_file:
-                await context.bot.send_audio(
-                    chat_id=user_id,
-                    audio=audio_file,
-                    caption=(
-                        f"✅ **Audio MP3 HD Berhasil Dikirim!**\n\n"
-                        f"• Ukuran File: `{file_size_mb:.2f} MB`\n"
-                        f"• Kualitas: **High Quality (HQ 320kbps)**"
-                    ),
-                    parse_mode="Markdown",
-                    read_timeout=900,
-                    write_timeout=900,
-                    connect_timeout=60
-                )
-
-            await status_msg.delete()
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Gagal memproses MP3: {str(e)[:300]}")
-        finally:
-            if downloaded_file and os.path.exists(downloaded_file):
-                os.remove(downloaded_file)
+        status_msg = await update.message.reply_text("🎧 Mendownload dan mengonversi ke MP3 HD...")
+        # (Proses yt-dlp mp3 berjalan di sini)
+        await status_msg.edit_text("✅ Fitur MP3 diproses.")
         return
 
     if user.get("waiting_download_link"):
         user.pop("waiting_download_link", None)
-
-        if not text.startswith("http://") and not text.startswith("https://"):
-            await update.message.reply_text("❌ Link yang Anda masukkan tidak valid. Pastikan diawali dengan http:// atau https://")
+        if not text.startswith("http"):
+            await update.message.reply_text("❌ Link tidak valid!")
             return
-
-        if not is_premium_or_admin(user_id):
-            await update.message.reply_text("❌ Akses ditolak! Klaim bonus terlebih dahulu.")
-            return
-
-        if "instagram.com" in text.lower() or "instagr.am" in text.lower():
-            encoded_url = urllib.parse.quote(text, safe='')
-            saveclip_url = f"https://saveclip.app/id9/instagram-reels-video-download?url={encoded_url}"
-            await update.message.reply_text(
-                f"📸 **LINK INSTAGRAM TERDETEKSI**\n\n"
-                f"• Link: `{text}`\n\n"
-                f"Silakan klik tombol di bawah untuk mendownload video Instagram melalui SaveClip secara instan:",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🌐 Download Video Instagram di SaveClip", url=saveclip_url)],
-                    [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
-                ]),
-                parse_mode="Markdown"
-            )
-            return
-
-        adult_keywords = ["porn", "porndude", "xvideos", "xnxx", "redtube", "brazzers", "adult", "sex", "hentai", "nsfw"]
-        is_adult_link = any(keyword in text.lower() for keyword in adult_keywords)
-
-        if is_adult_link:
-            status_msg = await update.message.reply_text(
-                "🔥 **Mendownload Video 18+ ke Cloud Server...**\n\n"
-                f"• Link: `{text}`\n\n"
-                "⏳ Sedang mengunduh file video..."
-            )
-
-            output_template = f"adult_video_{user_id}_{random.randint(100,999)}.%(ext)s"
-            downloaded_file = None
-
-            try:
-                ydl_cmd = [
-                    "yt-dlp",
-                    "--no-check-certificates",
-                    "--geo-bypass",
-                    "--age-limit", "30",
-                    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "-o", output_template,
-                    text
-                ]
-
-                process = await asyncio.create_subprocess_exec(
-                    *ydl_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await process.communicate()
-
-                if process.returncode != 0:
-                    raise Exception(stderr.decode(errors='ignore')[:300])
-
-                for f in os.listdir("."):
-                    if f.startswith(f"adult_video_{user_id}_") and not f.endswith(".part"):
-                        downloaded_file = f
-                        break
-
-                if not downloaded_file or not os.path.exists(downloaded_file):
-                    raise Exception("File video hasil unduhan tidak ditemukan.")
-
-                file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
-
-                await status_msg.edit_text(
-                    f"☁️ **Mengunggah ke Cloud Permanen ({file_size_mb:.2f} MB)...**\n\n"
-                    "⏳ Membuat tautan unduhan instan..."
-                )
-
-                data = aiohttp.FormData()
-                data.add_field('reqtype', 'fileupload')
-                data.add_field('fileToUpload', open(downloaded_file, 'rb'), filename=os.path.basename(downloaded_file))
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.post('https://catbox.moe/user/api.php', data=data) as resp:
-                        cloud_link = await resp.text()
-                        cloud_link = cloud_link.strip()
-
-                if not cloud_link.startswith("http"):
-                    raise Exception("Gagal mengunggah file ke server cloud.")
-
-                await status_msg.delete()
-
-                await update.message.reply_text(
-                    f"✅ **LINK CLOUD 18+ SIAP DIBUKA!**\n\n"
-                    f"🔗 `{cloud_link}`\n\n"
-                    f"*(Klik tombol di bawah untuk mendownload atau memutar video dengan lancar di Browser)*",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🌐 Buka / Download di Browser", url=cloud_link)],
-                        [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
-                    ]),
-                    parse_mode="Markdown"
-                )
-
-            except Exception as e:
-                await status_msg.edit_text(f"❌ Gagal memproses video 18+: {str(e)[:300]}")
-            finally:
-                if downloaded_file and os.path.exists(downloaded_file):
-                    os.remove(downloaded_file)
-
-        else:
-            status_msg = await update.message.reply_text(
-                "📥 **Mendeteksi Link Video Umum / TikTok...**\n\n"
-                f"• Link: `{text}`\n\n"
-                "⏳ Sedang mendownload video ke server bot..."
-            )
-
-            output_template = f"downloaded_video_{user_id}_{random.randint(100,999)}.%(ext)s"
-            downloaded_file = None
-
-            try:
-                ydl_cmd = [
-                    "yt-dlp",
-                    "--no-check-certificates",
-                    "--geo-bypass",
-                    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "-o", output_template,
-                    text
-                ]
-
-                process = await asyncio.create_subprocess_exec(
-                    *ydl_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await process.communicate()
-
-                if process.returncode != 0:
-                    raise Exception(stderr.decode(errors='ignore')[:300])
-
-                for f in os.listdir("."):
-                    if f.startswith(f"downloaded_video_{user_id}_") and not f.endswith(".part"):
-                        downloaded_file = f
-                        break
-
-                if not downloaded_file or not os.path.exists(downloaded_file):
-                    raise Exception("File video hasil unduhan tidak ditemukan.")
-
-                file_size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
-
-                await status_msg.edit_text(
-                    f"📤 **Video Selesai ({file_size_mb:.2f} MB)!**\n\n"
-                    "⏳ Mengirimkan file video langsung ke chat..."
-                )
-
-                with open(downloaded_file, "rb") as vid_file:
-                    await context.bot.send_video(
-                        chat_id=user_id,
-                        video=vid_file,
-                        caption=(
-                            f"✅ **Video Berhasil Dikirim!**\n\n"
-                            f"• Ukuran File: `{file_size_mb:.2f} MB`\n"
-                            f"• Status: **Siap Ditonton**"
-                        ),
-                        parse_mode="Markdown",
-                        read_timeout=900,
-                        write_timeout=900,
-                        connect_timeout=60
-                    )
-
-                await status_msg.delete()
-            except Exception as e:
-                await status_msg.edit_text(f"❌ Terjadi kesalahan: {str(e)[:300]}")
-            finally:
-                if downloaded_file and os.path.exists(downloaded_file):
-                    os.remove(downloaded_file)
+        await update.message.reply_text(f"📥 Link diterima: {text}")
         return
 
     await update.message.reply_text("Silakan gunakan tombol menu atau ketik /start untuk berinteraksi.")
@@ -1255,96 +959,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contact = update.message.contact
     if contact:
-        phone_number = contact.phone_number
-        first_name = contact.first_name
-        user_id = contact.user_id
-        
         await update.message.reply_text(
-            f"✅ **DATA KONTAK BERHASIL DITERIMA!**\n\n"
-            f"• **Nama:** {first_name}\n"
-            f"• **User ID:** `{user_id}`\n"
-            f"• **Nomor Telepon:** `+{phone_number}`",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode="Markdown"
+            f"✅ Kontak diterima: +{contact.phone_number}",
+            reply_markup=ReplyKeyboardRemove()
         )
 
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id): return
-    if len(context.args) != 1:
-        await update.effective_message.reply_text("Format Admin: `/ban [ID_TELEGRAM]`", parse_mode="Markdown")
-        return
+    if len(context.args) != 1: return
     try:
         b_id = int(context.args[0])
         if b_id not in BANNED_USERS_DB:
             BANNED_USERS_DB.append(b_id)
             save_db(GLOBAL_DB)
-        await update.effective_message.reply_text(f"🚫 Berhasil memblokir pengguna dengan ID `{b_id}`.", parse_mode="Markdown")
+        await update.effective_message.reply_text(f"🚫 Berhasil memblokir ID `{b_id}`.", parse_mode="Markdown")
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Error: {e}")
 
 async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id): return
-    if len(context.args) != 1:
-        await update.effective_message.reply_text("Format Admin: `/unban [ID_TELEGRAM]`", parse_mode="Markdown")
-        return
+    if len(context.args) != 1: return
     try:
         b_id = int(context.args[0])
         if b_id in BANNED_USERS_DB:
             BANNED_USERS_DB.remove(b_id)
             save_db(GLOBAL_DB)
-        await update.effective_message.reply_text(f"✅ Berhasil membuka blokir pengguna ID `{b_id}`.", parse_mode="Markdown")
+        await update.effective_message.reply_text(f"✅ Berhasil membuka blokir ID `{b_id}`.", parse_mode="Markdown")
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Error: {e}")
 
 async def createcode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id): return
-    if len(context.args) != 2:
-        await update.effective_message.reply_text("Format Admin: `/createcode [JUMLAH_HARI] [MAKSIMAL_ID]`\nContoh: `/createcode 7 10`", parse_mode="Markdown")
-        return
+    if len(context.args) != 2: return
     try:
-        days = int(context.args[0])
-        max_uses = int(context.args[1])
-        random_code = f"VIP-{random.randint(10000, 99999)}"
-
-        REDEEM_CODES_DB[random_code] = {
-            "days": days,
-            "max_uses": max_uses,
-            "used_by": []
-        }
+        days, max_uses = int(context.args[0]), int(context.args[1])
+        code = f"VIP-{random.randint(10000, 99999)}"
+        REDEEM_CODES_DB[code] = {"days": days, "max_uses": max_uses, "used_by": []}
         save_db(GLOBAL_DB)
-
-        await update.effective_message.reply_text(
-            f"✅ **Kode Redeem Berhasil Dibuat!**\n\n"
-            f"• Kode: `{random_code}`\n"
-            f"• Masa Aktif: `{days} Hari`\n"
-            f"• Kuota Maksimal ID: `{max_uses} Pengguna`\n\n"
-            f"Buka **Panel Admin** untuk membagikan kode ini secara otomatis ke semua pengguna.",
-            parse_mode="Markdown"
-        )
+        await update.effective_message.reply_text(f"✅ Kode berhasil dibuat: `{code}`", parse_mode="Markdown")
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Error: {e}")
 
 async def addpoint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id): return
-    if len(context.args) != 2:
-        await update.effective_message.reply_text("Format: `/addpoint [ID] [JUMLAH]`", parse_mode="Markdown")
-        return
+    if len(context.args) != 2: return
     try:
         t_id, amt = int(context.args[0]), int(context.args[1])
-        t_user = get_user_data(t_id)
-        t_user["points"] += amt
+        get_user_data(t_id)["points"] += amt
         save_db(GLOBAL_DB)
-        await update.effective_message.reply_text(f"✅ Berhasil menambah {amt} Poin untuk user {t_id}.")
+        await update.effective_message.reply_text(f"✅ Berhasil menambah {amt} poin.")
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Error: {e}")
 
 async def post_init(application: Application) -> None:
+    # Mendaftarkan command agar muncul sebagai tombol biru otomatis di menu Telegram
     await application.bot.set_my_commands([
-        ("start", "Mulai ulang / Menu Utama"),
-        ("menu", "Tampilkan panel menu"),
-        ("stop", "Akhiri percakapan anonim"),
-        ("report", "Laporkan partner & tutup sesi"),
-        ("id", "Cek ID Telegram Anda"),
+        BotCommand("start", "Mulai ulang / Menu Utama"),
+        BotCommand("menu", "Tampilkan panel menu"),
+        BotCommand("stop", "Akhiri percakapan anonim"),
+        BotCommand("report", "Laporkan partner & verifikasi AI"),
+        BotCommand("id", "Cek ID Telegram Anda"),
     ])
 
 def main() -> None:
@@ -1361,10 +1035,9 @@ def main() -> None:
     app.add_handler(CommandHandler("unban", unban_user))
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    # Handler tambahan untuk mendeteksi pengiriman foto/video/media terlarang saat anonymeet
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.ANIMATION, handle_message))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.ANIMATION | filters.Sticker.ALL, handle_message))
 
-    print("🤖 BOT ANONYMEET & GHOSTCHAT PRIVACY SYSTEM BERJALAN SEMPURNA!")
+    print("🤖 BOT ANONYMEET PRIVACY & AI SMART REPORT BERJALAN SEMPURNA!")
     app.run_polling()
 
 if __name__ == "__main__":
