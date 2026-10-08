@@ -1,4 +1,5 @@
 import re
+import math
 import asyncio
 import aiohttp
 from pathlib import Path
@@ -67,14 +68,39 @@ SUGGESTIONS_DB = GLOBAL_DB.setdefault("suggestions", [])
 BANNED_USERS_DB = GLOBAL_DB.setdefault("banned_users", [])
 ANONYMEET_BANS_DB = GLOBAL_DB.setdefault("anonymeet_bans", {})
 
-WAITING_ANONYMOUS_QUEUE = []
-ACTIVE_ANONYMOUS_CHATS = {} # user_id -> partner_id
-CHAT_HISTORY_LOGS = {} # user_id -> list of recent messages for AI report verification
+WAITING_ANONYMOUS_QUEUE = []        # Antrean acak
+WAITING_LOCATION_QUEUE = []       # Antrean berbasis lokasi [{user_id, lat, lon}, ...]
+ACTIVE_ANONYMOUS_CHATS = {}       # user_id -> partner_id
+CHAT_HISTORY_LOGS = {}            # user_id -> list of recent messages
 
 STRICT_ADULT_KEYWORDS = [
     "porno", "kontol", "memek", "ngentot", "colmek", "colok",
     "bokep", "nsfw", "open bo", "vcs", "pap tt", "pap memek", "sangean"
 ]
+
+def get_country_info(user) -> tuple[str, str]:
+    lang_code = (user.language_code or "").lower()
+    if "id" in lang_code:
+        return "Indonesia", "Indonesia 🇮🇩"
+    elif "en" in lang_code:
+        return "Global / English", "Global 🌐"
+    elif "ms" in lang_code:
+        return "Malaysia", "Malaysia 🇲🇾"
+    elif "ar" in lang_code:
+        return "Arab Emirates", "UAE 🇦🇪"
+    elif "ru" in lang_code:
+        return "Russia", "Russia 🇷🇺"
+    else:
+        return "International", "International 🌍"
+
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """Menghitung jarak dalam kilometer menggunakan Haversine Formula"""
+    R = 6371.0 # Radius bumi dalam km
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
 
 def is_admin(user_id: int) -> bool:
     return str(user_id) == str(ADMIN_ID) or user_id in ADMIN_IDS
@@ -99,7 +125,7 @@ def is_anonymeet_banned(user_id: int) -> tuple[bool, int]:
 
 def ban_user_anonymeet(user_id: int, hours: int = 3):
     if is_admin(user_id):
-        return # Admin mutlak kebal dari sanksi apa pun
+        return
     s_id = str(user_id)
     expire_time = time.time() + (hours * 3600)
     ANONYMEET_BANS_DB[s_id] = expire_time
@@ -131,7 +157,8 @@ def clear_user_flow(user: dict) -> None:
         "waiting_video_duration_secs", "waiting_download_link", "waiting_mp3_link", 
         "waiting_redeem_input", "waiting_suggestion_input", "selected_video_engine", 
         "waiting_custom_engine_prompt", "waiting_reaction_link", "selected_reaction_link", 
-        "selected_reaction_count", "waiting_telegram_id_input", "waiting_custom_admin_notice"
+        "selected_reaction_count", "waiting_telegram_id_input", "waiting_custom_admin_notice",
+        "waiting_location_share"
     ):
         user.pop(key, None)
 
@@ -192,6 +219,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     menu = [
         [InlineKeyboardButton("👥 Cari Pasangan (Anonymeet)", callback_data="anonymeet_start")],
+        [InlineKeyboardButton("📍 Cari Pasangan Terdekat (GPS)", callback_data="anonymeet_nearby_menu")],
         [InlineKeyboardButton("❤️ Reaksi Channel Telegram", callback_data="reaction_menu")],
         [InlineKeyboardButton("🎵 Buat Musik AI", callback_data="music"), InlineKeyboardButton("🎥 Buat Video AI (Engine)", callback_data="video_menu")],
         [InlineKeyboardButton("📥 Download Video / 18+", callback_data="download_zip_menu"), InlineKeyboardButton("🎧 Download MP3 HD", callback_data="mp3_download_menu")],
@@ -248,7 +276,10 @@ async def check_id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if is_banned(user_id): return
     await check_id_handler(update, update.effective_user)
 
-async def trigger_find_partner(bot, user_id, chat_obj):
+async def trigger_find_partner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_obj = update.effective_message
+
     is_banned_anon, sisa_detik = is_anonymeet_banned(user_id)
     if is_banned_anon:
         menit_sisa = int(sisa_detik // 60) + 1
@@ -282,11 +313,22 @@ async def trigger_find_partner(bot, user_id, chat_obj):
         gender_user = random.choice(genders)
         gender_partner = "Pria 👨" if gender_user == "Wanita 👩" else "Wanita 👩"
 
-        # Tentukan penanda Admin/Owner jika salah satu adalah admin
-        if is_admin(user_id):
-            gender_partner = "Owner / Admin 👑"
+        user_tg = update.effective_user
+        _, country_user_str = get_country_info(user_tg)
+
+        try:
+            partner_chat_member = await context.bot.get_chat(partner_id)
+            _, country_partner_str = get_country_info(partner_chat_member)
+        except Exception:
+            country_partner_str = "Indonesia 🇮🇩"
+
+        partner_display = gender_partner
         if is_admin(partner_id):
-            gender_user = "Owner / Admin 👑"
+            partner_display = "Owner / Admin 👑"
+
+        user_display = gender_user
+        if is_admin(user_id):
+            user_display = "Owner / Admin 👑"
 
         admin_notice = GLOBAL_DB.get("admin_broadcast_text", "Selamat mengobrol!")
 
@@ -294,8 +336,8 @@ async def trigger_find_partner(bot, user_id, chat_obj):
             f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
             f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
             f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
-            f"• Partner Anda: `{gender_partner}`\n"
-            f"• Asal: `Indonesia 🇮🇩`\n\n"
+            f"• Partner Anda: `{partner_display}`\n"
+            f"• Asal: `{country_partner_str}`\n\n"
             f"💬 Silakan kirim pesan.\n"
             f"• /next ➔ Langsung ganti pasangan baru\n"
             f"• /report ➔ Laporkan pelanggaran\n"
@@ -306,8 +348,8 @@ async def trigger_find_partner(bot, user_id, chat_obj):
             f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
             f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
             f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
-            f"• Partner Anda: `{gender_user}`\n"
-            f"• Asal: `Indonesia 🇮🇩`\n\n"
+            f"• Partner Anda: `{user_display}`\n"
+            f"• Asal: `{country_user_str}`\n\n"
             f"💬 Silakan kirim pesan.\n"
             f"• /next ➔ Langsung ganti pasangan baru\n"
             f"• /report ➔ Laporkan pelanggaran\n"
@@ -316,7 +358,7 @@ async def trigger_find_partner(bot, user_id, chat_obj):
 
         await chat_obj.reply_text(match_text_1, parse_mode="Markdown")
         try:
-            await bot.send_message(chat_id=partner_id, text=match_text_2, parse_mode="Markdown")
+            await context.bot.send_message(chat_id=partner_id, text=match_text_2, parse_mode="Markdown")
         except Exception:
             pass
     else:
@@ -344,7 +386,25 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if user_id in ACTIVE_ANONYMOUS_CHATS:
             await query.message.reply_text("⚠️ Anda sedang terhubung dengan seseorang! Ketik /next, /stop, atau /report terlebih dahulu.")
             return
-        await trigger_find_partner(context.bot, user_id, query.message)
+        await trigger_find_partner(update, context)
+        return
+
+    if data == "anonymeet_nearby_menu":
+        await query.answer()
+        clear_user_flow(user)
+        user["waiting_location_share"] = True
+        
+        # Buat tombol keyboard untuk meminta lokasi otomatis secara opsional
+        loc_keyboard = [[KeyboardButton("📍 Bagikan Lokasi Saya Sekarang", request_location=True)]]
+        reply_markup = ReplyKeyboardMarkup(loc_keyboard, resize_keyboard=True, one_time_keyboard=True)
+        
+        await query.message.reply_text(
+            "📍 **CARI PASANGAN TERDEKAT (GPS)**\n\n"
+            "Bot akan menghubungkan Anda dengan pengguna lain yang berada di radius terdekat.\n\n"
+            "• Jika Anda bersedia, silakan klik tombol **'📍 Bagikan Lokasi Saya Sekarang'** di bawah.\n"
+            "• Jika Anda **tidak ingin** membagikan lokasi, cukupabaikan pesan ini atau kembali ke menu utama.",
+            reply_markup=reply_markup
+        )
         return
 
     if data == "set_admin_notice_menu":
@@ -720,7 +780,7 @@ async def next_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         WAITING_ANONYMOUS_QUEUE.remove(user_id)
 
     await update.message.reply_text("🔄 **Mencari pasangan baru...** Mohon tunggu sebentar.")
-    await trigger_find_partner(context.bot, user_id, update.message)
+    await trigger_find_partner(update, context)
 
 async def report_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -795,6 +855,80 @@ async def report_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔴 Akhiri Sesi (/stop)", callback_data="anonymeet_cancel")]
             ])
+        )
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    user = get_user_data(user_id)
+    
+    if not user.get("waiting_location_share"):
+        return
+
+    user.pop("waiting_location_share", None)
+    loc = update.message.location
+    lat, lon = loc.latitude, loc.longitude
+
+    # Cek apakah ada pengguna lain di antrean lokasi
+    matched_partner = None
+    for idx, waiting_item in enumerate(WAITING_LOCATION_QUEUE):
+        p_id = waiting_item["user_id"]
+        p_lat, p_lon = waiting_item["lat"], waiting_item["lon"]
+        
+        # Hitung jarak (misal dalam radius <= 30 km dianggap dekat)
+        dist = calculate_distance(lat, lon, p_lat, p_lon)
+        if dist <= 30.0:
+            matched_partner = WAITING_LOCATION_QUEUE.pop(idx)
+            break
+
+    if matched_partner:
+        partner_id = matched_partner["user_id"]
+        ACTIVE_ANONYMOUS_CHATS[user_id] = partner_id
+        ACTIVE_ANONYMOUS_CHATS[partner_id] = user_id
+
+        CHAT_HISTORY_LOGS[user_id] = []
+        CHAT_HISTORY_LOGS[partner_id] = []
+
+        genders = ["Pria 👨", "Wanita 👩"]
+        gender_user = random.choice(genders)
+        gender_partner = "Pria 👨" if gender_user == "Wanita 👩" else "Wanita 👩"
+
+        partner_display = gender_partner
+        if is_admin(partner_id):
+            partner_display = "Owner / Admin 👑"
+
+        user_display = gender_user
+        if is_admin(user_id):
+            user_display = "Owner / Admin 👑"
+
+        admin_notice = GLOBAL_DB.get("admin_broadcast_text", "Selamat mengobrol!")
+
+        match_text_1 = (
+            f"✨ **Pasangan Terdekat (GPS) Ditemukan!** ✨\n\n"
+            f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+            f"🔒 **Privasi Terjaga:** Lokasi tepat Anda disembunyikan.\n"
+            f"• Partner Anda: `{partner_display}`\n\n"
+            f"💬 Silakan kirim pesan. Ketik /next, /report, atau /stop."
+        )
+
+        match_text_2 = (
+            f"✨ **Pasangan Terdekat (GPS) Ditemukan!** ✨\n\n"
+            f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+            f"🔒 **Privasi Terjaga:** Lokasi tepat Anda disembunyikan.\n"
+            f"• Partner Anda: `{user_display}`\n\n"
+            f"💬 Silakan kirim pesan. Ketik /next, /report, atau /stop."
+        )
+
+        await update.message.reply_text(match_text_1, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
+        try:
+            await context.bot.send_message(chat_id=partner_id, text=match_text_2, parse_mode="Markdown")
+        except Exception:
+            pass
+    else:
+        WAITING_LOCATION_QUEUE.append({"user_id": user_id, "lat": lat, "lon": lon})
+        await update.message.reply_text(
+            "📍 **Lokasi Diterima!**\nSedang mencari pengguna terdekat di sekitar Anda...\nMohon tunggu sebentar.",
+            reply_markup=ReplyKeyboardRemove(),
+            parse_mode="Markdown"
         )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1049,10 +1183,11 @@ def main() -> None:
     app.add_handler(CommandHandler("ban", ban_user))
     app.add_handler(CommandHandler("unban", unban_user))
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.ANIMATION | filters.Sticker.ALL, handle_message))
 
-    print("🤖 BOT ANONYMEET OWNER TAG, NEXT & AI SMART REPORT BERJALAN SEMPURNA!")
+    print("🤖 BOT ANONYMEET GPS NEARBY & SMART FEATURES BERJALAN SEMPURNA!")
     app.run_polling()
 
 if __name__ == "__main__":
