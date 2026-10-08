@@ -24,7 +24,7 @@ from groq import Groq
 import openai
 
 # ==================== KONFIGURASI UTAMA ====================
-TOKEN = "8737678492:AAFs_qlovfO11Ki-Acg6mzqk0A_PyBYvVLw"
+TOKEN = "8737678492:AAFXMAFw16NRva7Bg9wN4F6EP7DnxEGsIzw"
 ADMIN_ID = 5794869044
 ADMIN_USERNAME = "@Bymodz"
 
