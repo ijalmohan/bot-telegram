@@ -86,10 +86,6 @@ def get_country_info(user) -> tuple[str, str]:
         return "Global / English", "Global 🌐"
     elif "ms" in lang_code:
         return "Malaysia", "Malaysia 🇲🇾"
-    elif "ar" in lang_code:
-        return "Arab Emirates", "UAE 🇦🇪"
-    elif "ru" in lang_code:
-        return "Russia", "Russia 🇷🇺"
     else:
         return "International", "International 🌍"
 
@@ -193,6 +189,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("❌ Akun Anda telah diblokir dari bot ini.")
         return
 
+    # Bersihkan sesi obrolan aktif saat /start ditekan agar tidak nyangkut
     if user_id in ACTIVE_ANONYMOUS_CHATS:
         partner_id = ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
         if partner_id in ACTIVE_ANONYMOUS_CHATS:
@@ -200,7 +197,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 await context.bot.send_message(
                     chat_id=partner_id,
-                    text="🔴 Pasangan Anda menutup percakapan. Ketik /start untuk mulai mencari pasangan baru."
+                    text="🔴 Pasangan Anda menutup percakapan."
                 )
             except Exception:
                 pass
@@ -287,7 +284,6 @@ async def trigger_find_partner(update: Update, context: ContextTypes.DEFAULT_TYP
         await chat_obj.reply_text(f"❌ **Akses Anonymeet Ditangguhkan!**\nAnda diblokir dari fitur ini selama {menit_sisa} menit lagi.")
         return
 
-    # Hapus user dari antrean jika sebelumnya sudah ada
     global WAITING_ANONYMOUS_QUEUE
     WAITING_ANONYMOUS_QUEUE = [item for item in WAITING_ANONYMOUS_QUEUE if item["user_id"] != user_id]
 
@@ -296,7 +292,6 @@ async def trigger_find_partner(update: Update, context: ContextTypes.DEFAULT_TYP
         for idx, queued in enumerate(WAITING_ANONYMOUS_QUEUE):
             if queued["user_id"] == user_id:
                 continue
-            # Jika user premium dan memilih gender tertentu
             if is_prem and pref_gender and pref_gender != "Semua":
                 if queued["gender"] == pref_gender:
                     partner_idx = idx
@@ -313,7 +308,6 @@ async def trigger_find_partner(update: Update, context: ContextTypes.DEFAULT_TYP
 
             is_p_banned, _ = is_anonymeet_banned(partner_id)
             if is_p_banned:
-                # Masukkan kembali user saat ini ke antrean
                 user_gender = detect_user_gender(update.effective_user)
                 _, user_country = get_country_info(update.effective_user)
                 WAITING_ANONYMOUS_QUEUE.append({"user_id": user_id, "gender": user_gender, "country": user_country, "pref": pref_gender})
@@ -322,9 +316,6 @@ async def trigger_find_partner(update: Update, context: ContextTypes.DEFAULT_TYP
 
             ACTIVE_ANONYMOUS_CHATS[user_id] = partner_id
             ACTIVE_ANONYMOUS_CHATS[partner_id] = user_id
-
-            CHAT_HISTORY_LOGS[user_id] = []
-            CHAT_HISTORY_LOGS[partner_id] = []
 
             user_gender = detect_user_gender(update.effective_user)
             _, user_country = get_country_info(update.effective_user)
@@ -399,10 +390,33 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user_data(user_id)
     data = query.data
 
+    if data == "admin":
+        if not is_admin(user_id):
+            await query.answer("❌ Akses ditolak!", show_alert=True)
+            return
+        await query.answer()
+        current_notice = GLOBAL_DB.get("admin_broadcast_text", "-")
+        kb_admin = [
+            [InlineKeyboardButton("✏️ Set Kata Kustom Anonymeet", callback_data="set_admin_notice_menu")],
+            [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
+        ]
+        await query.message.reply_text(
+            "👑 **PANEL ADMIN**\n\n"
+            f"📢 **Kata Kustom Aktif Saat Ini:**\n> *{current_notice}*\n\n"
+            "• Tambah Poin: `/addpoint [ID] [JUMLAH]`\n"
+            "• Tambah Saldo: `/addsaldo [ID] [JUMLAH]`\n"
+            "• Buat Kode: `/createcode [HARI] [MAKS]`\n"
+            "• **Blokir User:** `/ban [ID]`\n"
+            "• **Buka Blokir:** `/unban [ID]`",
+            reply_markup=InlineKeyboardMarkup(kb_admin),
+            parse_mode="Markdown"
+        )
+        return
+
     if data == "anonymeet_start":
         await query.answer()
         if user_id in ACTIVE_ANONYMOUS_CHATS:
-            await query.message.reply_text("⚠️ Anda sedang terhubung dalam sesi obrolan! Selesaikan atau akhiri terlebih dahulu.")
+            await query.message.reply_text("⚠️ Anda sedang terhubung dalam sesi obrolan! Ketik /stop untuk mengakhiri.")
             return
         
         is_prem = is_anonymeet_premium(user_id)
@@ -536,10 +550,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    if data == "admin" and not is_admin(user_id):
-        await query.answer("Akses ditolak.", show_alert=True)
-        return
-
     if data == "check_id":
         await query.answer()
         await check_id_handler(query, user)
@@ -621,30 +631,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    if data == "admin":
-        if not is_admin(user_id):
-            await query.answer("❌ Akses ditolak!", show_alert=True)
-            return
-
-        current_notice = GLOBAL_DB.get("admin_broadcast_text", "-")
-        kb_admin = [
-            [InlineKeyboardButton("✏️ Set Kata Kustom Anonymeet", callback_data="set_admin_notice_menu")],
-            [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
-        ]
-
-        await query.message.reply_text(
-            "👑 **PANEL ADMIN**\n\n"
-            f"📢 **Kata Kustom Aktif Saat Ini:**\n> *{current_notice}*\n\n"
-            "• Tambah Poin: `/addpoint [ID] [JUMLAH]`\n"
-            "• Tambah Saldo: `/addsaldo [ID] [JUMLAH]`\n"
-            "• Buat Kode: `/createcode [HARI] [MAKS]`\n"
-            "• **Blokir User:** `/ban [ID]`\n"
-            "• **Buka Blokir:** `/unban [ID]`",
-            reply_markup=InlineKeyboardMarkup(kb_admin),
-            parse_mode="Markdown"
-        )
-        return
-
     await query.answer("Fitur siap digunakan.")
 
 async def stop_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -667,7 +653,7 @@ async def stop_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             ])
         )
     else:
-        await update.message.reply_text("❌ Anda sedang tidak terhubung dalam percakapan aktif.")
+        await update.message.reply_text("❌ Anda sedang tidak terhubung dalam percakapan aktif. Ketik /start untuk kembali ke menu utama.")
 
 async def next_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
