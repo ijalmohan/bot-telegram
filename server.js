@@ -6,11 +6,11 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-let waitingUser = null;
-const rooms = new Map(); // ws -> partner_ws
+let waitingQueue = [];
+const clients = new Map(); // ws -> partner_ws
 
 wss.on('connection', (ws) => {
-    console.log('Pengguna terhubung ke signaling server.');
+    console.log('Client terhubung.');
 
     ws.on('message', (message) => {
         let data;
@@ -22,34 +22,49 @@ wss.on('connection', (ws) => {
 
         switch (data.type) {
             case 'find':
-                // Jika ada user sedang menunggu
-                if (waitingUser && waitingUser !== ws && waitingUser.readyState === WebSocket.OPEN) {
-                    rooms.set(ws, waitingUser);
-                    rooms.set(waitingUser, ws);
+                // Hapus dari antrean jika sudah ada sebelumnya
+                waitingQueue = waitingQueue.filter(item => item !== ws);
 
-                    // Beritahu keduanya bahwa partner ditemukan
-                    ws.send(JSON.stringify({ type: 'matched', role: 'caller' }));
-                    waitingUser.send(JSON.stringify({ type: 'matched', role: 'callee' }));
+                if (waitingQueue.length > 0) {
+                    // Ambil partner dari antrean terdepan
+                    const partner = waitingQueue.shift();
 
-                    waitingUser = null; // Reset antrean
+                    if (partner && partner.readyState === WebSocket.OPEN) {
+                        clients.set(ws, partner);
+                        clients.set(partner, ws);
+
+                        // Kirim sinyal match (satu sebagai caller, satu sebagai callee)
+                        ws.send(JSON.stringify({ type: 'matched', role: 'caller' }));
+                        partner.send(JSON.stringify({ type: 'matched', role: 'callee' }));
+                        console.log('Pasangan ditemukan dan dihubungkan!');
+                    } else {
+                        waitingQueue.push(ws);
+                        ws.send(JSON.stringify({ type: 'waiting' }));
+                    }
                 } else {
-                    waitingUser = ws;
+                    waitingQueue.push(ws);
                     ws.send(JSON.stringify({ type: 'waiting' }));
+                    console.log('User masuk antrean tunggu.');
                 }
                 break;
 
             case 'next':
-                // Putus dari partner lama
-                cleanupPartner(ws);
-                // Masukkan kembali ke antrean cari partner
-                if (waitingUser && waitingUser !== ws && waitingUser.readyState === WebSocket.OPEN) {
-                    rooms.set(ws, waitingUser);
-                    rooms.set(waitingUser, ws);
-                    ws.send(JSON.stringify({ type: 'matched', role: 'caller' }));
-                    waitingUser.send(JSON.stringify({ type: 'matched', role: 'callee' }));
-                    waitingUser = null;
+                disconnectPartner(ws);
+                // Masukkan kembali ke antrean pencarian
+                waitingQueue = waitingQueue.filter(item => item !== ws);
+                if (waitingQueue.length > 0) {
+                    const partner = waitingQueue.shift();
+                    if (partner && partner.readyState === WebSocket.OPEN) {
+                        clients.set(ws, partner);
+                        clients.set(partner, ws);
+                        ws.send(JSON.stringify({ type: 'matched', role: 'caller' }));
+                        partner.send(JSON.stringify({ type: 'matched', role: 'callee' }));
+                    } else {
+                        waitingQueue.push(ws);
+                        ws.send(JSON.stringify({ type: 'waiting' }));
+                    }
                 } else {
-                    waitingUser = ws;
+                    waitingQueue.push(ws);
                     ws.send(JSON.stringify({ type: 'waiting' }));
                 }
                 break;
@@ -57,40 +72,38 @@ wss.on('connection', (ws) => {
             case 'offer':
             case 'answer':
             case 'candidate':
-                const partner = rooms.get(ws);
+                const partner = clients.get(ws);
                 if (partner && partner.readyState === WebSocket.OPEN) {
                     partner.send(JSON.stringify(data));
                 }
                 break;
 
             case 'hangup':
-                cleanupPartner(ws);
+                disconnectPartner(ws);
                 ws.send(JSON.stringify({ type: 'ended' }));
                 break;
         }
     });
 
     ws.on('close', () => {
-        if (waitingUser === ws) {
-            waitingUser = null;
-        }
-        cleanupPartner(ws);
-        console.log('Pengguna terputus.');
+        waitingQueue = waitingQueue.filter(item => item !== ws);
+        disconnectPartner(ws);
+        console.log('Client terputus.');
     });
 });
 
-function cleanupPartner(ws) {
-    const partner = rooms.get(ws);
+function disconnectPartner(ws) {
+    const partner = clients.get(ws);
     if (partner) {
         if (partner.readyState === WebSocket.OPEN) {
             partner.send(JSON.stringify({ type: 'peer_disconnected' }));
         }
-        rooms.delete(partner);
-        rooms.delete(ws);
+        clients.delete(partner);
+        clients.delete(ws);
     }
 }
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Signaling server berjalan di port ${PORT}`);
+    console.log(`Signaling server aktif di port ${PORT}`);
 });
