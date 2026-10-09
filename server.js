@@ -6,16 +6,11 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-let waitingQueue = [];
-const clients = new Map();
+app.use(express.static('public'));
 
-app.get('/', (req, res) => {
-    res.send('WebSocket Signaling Server is running!');
-});
+let waitingUser = null;
 
 wss.on('connection', (ws) => {
-    console.log('Client terhubung via WebSocket.');
-
     ws.on('message', (message) => {
         let data;
         try {
@@ -24,81 +19,50 @@ wss.on('connection', (ws) => {
             return;
         }
 
-        switch (data.type) {
-            case 'find':
-                waitingQueue = waitingQueue.filter(item => item !== ws);
-                if (waitingQueue.length > 0) {
-                    const partner = waitingQueue.shift();
-                    if (partner && partner.readyState === ws.OPEN) {
-                        clients.set(ws, partner);
-                        clients.set(partner, ws);
+        if (data.type === 'join') {
+            if (waitingUser && waitingUser !== ws && waitingUser.readyState === ws.OPEN) {
+                // Pasangkan pengguna
+                ws.partner = waitingUser;
+                waitingUser.partner = ws;
 
-                        ws.send(JSON.stringify({ type: 'matched', role: 'caller' }));
-                        partner.send(JSON.stringify({ type: 'matched', role: 'callee' }));
-                    } else {
-                        waitingQueue.push(ws);
-                        ws.send(JSON.stringify({ type: 'waiting' }));
-                    }
-                } else {
-                    waitingQueue.push(ws);
-                    ws.send(JSON.stringify({ type: 'waiting' }));
-                }
-                break;
+                ws.send(JSON.stringify({ type: 'matched' }));
+                waitingUser.send(JSON.stringify({ type: 'matched' }));
 
-            case 'next':
-                disconnectPartner(ws);
-                waitingQueue = waitingQueue.filter(item => item !== ws);
-                if (waitingQueue.length > 0) {
-                    const partner = waitingQueue.shift();
-                    if (partner && partner.readyState === ws.OPEN) {
-                        clients.set(ws, partner);
-                        clients.set(partner, ws);
-                        ws.send(JSON.stringify({ type: 'matched', role: 'caller' }));
-                        partner.send(JSON.stringify({ type: 'matched', role: 'callee' }));
-                    } else {
-                        waitingQueue.push(ws);
-                        ws.send(JSON.stringify({ type: 'waiting' }));
-                    }
-                } else {
-                    waitingQueue.push(ws);
-                    ws.send(JSON.stringify({ type: 'waiting' }));
-                }
-                break;
-
-            case 'offer':
-            case 'answer':
-            case 'candidate':
-                const partner = clients.get(ws);
-                if (partner && partner.readyState === ws.OPEN) {
-                    partner.send(JSON.stringify(data));
-                }
-                break;
-
-            case 'hangup':
-                disconnectPartner(ws);
-                ws.send(JSON.stringify({ type: 'ended' }));
-                break;
+                waitingUser = null;
+            } else {
+                waitingUser = ws;
+                ws.send(JSON.stringify({ type: 'waiting' }));
+            }
+        } else if (data.type === 'signal') {
+            if (ws.partner && ws.partner.readyState === ws.OPEN) {
+                ws.partner.send(JSON.stringify({ type: 'signal', data: data.data }));
+            }
+        } else if (data.type === 'skip') {
+            if (ws.partner) {
+                ws.partner.send(JSON.stringify({ type: 'partner_skipped' }));
+                ws.partner.partner = null;
+                ws.partner = null;
+            }
+            if (waitingUser === ws) {
+                waitingUser = null;
+            }
+            waitingUser = ws;
+            ws.send(JSON.stringify({ type: 'waiting' }));
         }
     });
 
     ws.on('close', () => {
-        waitingQueue = waitingQueue.filter(item => item !== ws);
-        disconnectPartner(ws);
+        if (ws.partner && ws.partner.readyState === ws.OPEN) {
+            ws.partner.send(JSON.stringify({ type: 'partner_disconnected' }));
+            ws.partner.partner = null;
+        }
+        if (waitingUser === ws) {
+            waitingUser = null;
+        }
     });
 });
 
-function disconnectPartner(ws) {
-    const partner = clients.get(ws);
-    if (partner) {
-        if (partner.readyState === ws.OPEN) {
-            partner.send(JSON.stringify({ type: 'peer_disconnected' }));
-        }
-        clients.delete(partner);
-        clients.delete(ws);
-    }
-}
-
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Server berjalan di port ${PORT}`);
+    console.log(`Server WebSocket berjalan di port ${PORT}`);
 });
