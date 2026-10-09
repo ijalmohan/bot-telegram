@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voice Random Call - Real</title>
+    <title>Voice Random Call - Real WebRTC</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         body {
@@ -30,7 +30,6 @@
         .status { font-size: 20px; font-weight: bold; margin-bottom: 10px; }
         .sub { font-size: 14px; color: #8b949e; margin-bottom: 25px; }
         
-        /* Animasi Gelombang Suara */
         .wave-container {
             display: flex;
             justify-content: center;
@@ -55,11 +54,7 @@
             100% { height: 35px; background: #2ea043; }
         }
 
-        .btn-group {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
+        .btn-group { display: flex; flex-direction: column; gap: 12px; }
         .btn {
             background-color: #238636;
             color: white;
@@ -70,7 +65,6 @@
             cursor: pointer;
             font-weight: bold;
             width: 100%;
-            transition: 0.2s;
         }
         .btn:active { opacity: 0.8; }
         .btn-secondary { background-color: #30363d; color: #c9d1d9; }
@@ -78,11 +72,11 @@
     </style>
 </head>
 <body>
-    <div class="header">🎙️ VOISA.TG REAL CALL</div>
+    <div class="header">🎙️ VOICE RANDOM CALL</div>
     
     <div class="card">
         <div class="status" id="statusText">Siap Mencari Partner</div>
-        <div class="sub" id="subText">Tekan tombol di bawah untuk mulai menghubungkan suara secara acak.</div>
+        <div class="sub" id="subText">Tekan tombol di bawah untuk mulai menelepon secara acak.</div>
         
         <div class="wave-container" id="waveBox">
             <div class="wave"></div>
@@ -93,74 +87,153 @@
     </div>
 
     <div class="btn-group" id="controls">
-        <button class="btn" id="mainBtn" onclick="startSearching()">Mulai Panggilan</button>
+        <button class="btn" onclick="startCall()">Mulai Panggilan</button>
     </div>
+
+    <audio id="remoteAudio" autoplay></audio>
 
     <script>
         let tg = window.Telegram.WebApp;
         tg.expand();
 
+        let ws = null;
         let localStream = null;
         let peerConnection = null;
-        let ws = null;
-        let userId = tg.initDataUnsafe?.user?.id || Math.floor(Math.random() * 1000000);
 
-        // Server WebSocket gratis publik untuk sinyal WebRTC pencocokan suara real-time
-        const WS_URL = "wss://socketsaus.herokuapp.com/"; // atau server signaling publik
+        // Konfigurasi STUN server gratis Google untuk melewati jaringan NAT/router
+        const rtcConfig = {
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        };
 
-        async function startSearching() {
-            document.getElementById("statusTextinnerText = "Meminta Izin Mikrofon...");
-            document.getElementById("subText").innerText = "Harap izinkan akses mikrofon di perangkat Anda.";
-            
+        // Ganti dengan URL WebSocket server Anda setelah di-deploy (Ganti wss:// dengan ws:// jika tidak pakai SSL, atau wss:// untuk production)
+        const WS_SERVER_URL = "wss://YOUR-SIGNALING-SERVER-URL.railway.app"; 
+
+        async function startCall() {
             try {
-                // Meminta izin mikrofon nyata dari HP pengguna
+                document.getElementById("statusText").innerText = "Meminta Izin Mikrofon...";
+                document.getElementById("subText").innerText = "Harap izinkan akses mikrofon.";
+                
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                
-                document.getElementById("statusText").innerText = "Mencari Partner Suara...";
-                document.getElementById("subText").innerText = "Menghubungkan ke saluran acak...";
+
+                document.getElementById("statusText").innerText = "Mencari Partner...";
+                document.getElementById("subText").innerText = "Menghubungkan ke server antrean...";
                 document.getElementById("waveBox").style.display = "flex";
-                
-                // Ubah tombol menjadi kontrol saat menelepon
+
                 document.getElementById("controls").innerHTML = `
                     <button class="btn btn-secondary" onclick="nextPartner()">🔄 Ganti / Next Partner</button>
                     <button class="btn btn-danger" onclick="endCall()">☎️ Matikan Telepon</button>
                 `;
 
-                // Simulasi pencarian real-time (bisa dihubungkan ke backend signaling WebRTC kustom Anda)
-                connectSignalingServer();
-
+                connectWebSocket();
             } catch (err) {
-                alert("Gagal mengakses mikrofon! Pastikan Anda mengizinkan izin mikrofon.");
+                alert("Gagal mengakses mikrofon!");
                 endCall();
             }
         }
 
-        function connectSignalingServer() {
-            // Logika WebRTC Signaling untuk mencocokkan user secara nyata
-            setTimeout(() => {
-                document.getElementById("statusText").innerText = "TERHUBUNG DENGAN ORANG BARU 🟢";
-                document.getElementById("subText").innerText = "Mikrofon aktif. Silakan mulai berbicara secara langsung.";
-            }, 3000);
+        function connectWebSocket() {
+            ws = new WebSocket(WS_SERVER_URL);
+
+            ws.onopen = () => {
+                ws.send(JSON.stringify({ type: 'find' }));
+            };
+
+            ws.onmessage = async (event) => {
+                const message = JSON.parse(event.data);
+
+                if (message.type === 'waiting') {
+                    document.getElementById("statusText").innerText = "Mencari Partner Suara...";
+                    document.getElementById("subText").innerText = "Menunggu pengguna lain bergabung...";
+                } 
+                else if (message.type === 'matched') {
+                    document.getElementById("statusText").innerText = "TERHUBUNG DENGAN ORANG BARU 🟢";
+                    document.getElementById("subText").innerText = "Berbicara secara langsung...";
+                    
+                    setupPeerConnection(message.role);
+                } 
+                else if (message.type === 'offer') {
+                    if (!peerConnection) setupPeerConnection('callee');
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(message.offer));
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    ws.send(JSON.stringify({ type: 'answer', answer: answer }));
+                } 
+                else if (message.type === 'answer') {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(message.answer));
+                } 
+                else if (message.type === 'candidate') {
+                    if (peerConnection) {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                    }
+                } 
+                else if (message.type === 'peer_disconnected' || message.type === 'ended') {
+                    resetCallState("Partner meninggalkan panggilan.");
+                }
+            };
+        }
+
+        function setupPeerConnection(role) {
+            peerConnection = new RTCPeerConnection(rtcConfig);
+
+            // Tambahkan track audio lokal ke koneksi
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            // Tangkap suara dari partner (remote user)
+            peerConnection.ontrack = (event) => {
+                const remoteAudio = document.getElementById("remoteAudio");
+                remoteAudio.srcObject = event.streams[0];
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    ws.send(JSON.stringify({ type: 'candidate', candidate: event.candidate }));
+                }
+            };
+
+            if (role === 'caller') {
+                peerConnection.createOffer().then(offer => {
+                    peerConnection.setLocalDescription(offer);
+                    ws.send(JSON.stringify({ type: 'offer', offer: offer }));
+                });
+            }
         }
 
         function nextPartner() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
             document.getElementById("statusText").innerText = "Mencari Partner Baru...";
-            document.getElementById("subText").innerText = "Memutuskan partner lama & mencari yang lain...";
-            setTimeout(() => {
-                document.getElementById("statusText").innerText = "TERHUBUNG DENGAN ORANG BARU 🟢";
-                document.getElementById("subText").innerText = "Mikrofon aktif. Silakan berbicara.";
-            }, 2000);
+            document.getElementById("subText").innerText = "Memindah saluran suara...";
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'next' }));
+            }
         }
 
         function endCall() {
             if (localStream) {
                 localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
             }
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'hangup' }));
+                ws.close();
+            }
+            resetCallState("Panggilan Diakhiri");
+        }
+
+        function resetCallState(reason) {
             document.getElementById("waveBox").style.display = "none";
-            document.getElementById("statusText").innerText = "Panggilan Diakhiri";
+            document.getElementById("statusText").innerText = reason;
             document.getElementById("subText").innerText = "Tekan tombol di bawah untuk menelepon lagi.";
             document.getElementById("controls").innerHTML = `
-                <button class="btn" onclick="startSearching()">Mulai Panggilan</button>
+                <button class="btn" onclick="startCall()">Mulai Panggilan</button>
             `;
         }
     </script>
