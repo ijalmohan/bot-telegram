@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Random Call</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding: 20px;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            height: 90vh;
+        }
+        .header { font-size: 20px; font-weight: bold; margin-top: 10px; }
+        .status-box {
+            background: #1e1e1e;
+            padding: 30px;
+            border-radius: 15px;
+            margin: 20px 0;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        }
+        .btn {
+            background-color: #2481cc;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 18px;
+            border-radius: 30px;
+            cursor: pointer;
+            width: 100%;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        .btn-danger { background-color: #e53935; }
+        .btn:active { opacity: 0.8; }
+    </style>
+</head>
+<body>
+    <div class="header">🎙️ Voice Random Chat</div>
+    
+    <div class="status-box">
+        <h2 id="statusText">Siap Mencari Partner</h2>
+        <p id="subText">Tekan tombol di bawah untuk mulai menelepon secara acak.</p>
+    </div>
+
+    <div>
+        <button id="actionBtn" class="btn" onclick="startCall()">Mulai Panggilan</button>
+        <button id="hangupBtn" class="btn btn-danger" style="display:none;" onclick="endCall()">Matikan Telepon</button>
+    </div>
+
+    <script>
+        let tg = window.Telegram.WebApp;
+        tg.expand(); // Memperluas WebApp agar fullscreen di Telegram
+
+        function startCall() {
+            document.getElementById("statusText").innerText = "Menghubungkan...";
+            document.getElementById("subText").innerText = "Mencari suara acak di sekitar Anda...";
+            document.getElementById("actionBtn").style.display = "none";
+            
+            // Simulasi koneksi berhasil setelah 2 detik
+            setTimeout(() => {
+                document.getElementById("statusText").innerText = "TERHUBUNG DENGAN ORANG BARU 🟢";
+                document.getElementById("subText").innerText = "Mikrofon aktif. Silakan mulai berbicara.";
+                document.getElementById("hangupBtn").style.display = "block";
+            }, 2000);
+        }
+
+        function endCall() {
+            document.getElementById("statusText").innerText = "Panggilan Diakhiri";
+            document.getElementById("subText").innerText = "Tekan mulai untuk mencari lagi.";
+            document.getElementById("hangupBtn").style.display = "none";
+            document.getElementById("actionBtn").style.display = "block";
+        }
+    </script>
+</body>
+</html>
