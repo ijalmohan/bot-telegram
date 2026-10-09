@@ -69,7 +69,6 @@ BANNED_USERS_DB = GLOBAL_DB.setdefault("banned_users", [])
 ANONYMEET_BANS_DB = GLOBAL_DB.setdefault("anonymeet_bans", {})
 
 WAITING_ANONYMOUS_QUEUE = []
-WAITING_LOCATION_QUEUE = []
 ACTIVE_ANONYMOUS_CHATS = {}
 CHAT_HISTORY_LOGS = {}
 
@@ -89,13 +88,13 @@ def get_country_info(user) -> tuple[str, str]:
     else:
         return "International", "International 🌍"
 
-def calculate_distance(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
+def detect_user_gender(user) -> str:
+    # Deteksi otomatis gender berdasarkan nama depan atau secara cerdas
+    name = (user.first_name or "").lower()
+    female_keywords = ["siti", "putri", "ayu", "dewi", "anisa", "zahra", "nur", "fitri", "indah", "nina", "vina", "dinda"]
+    if any(k in name for k in female_keywords):
+        return "Wanita 👩"
+    return "Pria 👨"
 
 def is_admin(user_id: int) -> bool:
     return str(user_id) == str(ADMIN_ID) or user_id in ADMIN_IDS
@@ -116,36 +115,18 @@ def is_anonymeet_banned(user_id: int) -> tuple[bool, int]:
             save_db(GLOBAL_DB)
     return False, 0
 
-def ban_user_anonymeet(user_id: int, hours: int = 3):
-    if is_admin(user_id): return
-    ANONYMEET_BANS_DB[str(user_id)] = time.time() + (hours * 3600)
-    save_db(GLOBAL_DB)
-
 def is_permanent_premium(user_id: int) -> bool:
     return is_admin(user_id) or user_id in PREMIUM_IDS
 
-def is_premium_or_admin(user_id: int) -> bool:
+def is_anonymeet_premium(user_id: int) -> bool:
     if is_permanent_premium(user_id): return True
     user = get_user_data(user_id)
-    return time.time() < user.get("bonus_expire_time", 0)
+    return time.time() < user.get("anonymeet_premium_expire", 0)
 
 def admin_url() -> str:
     username = str(ADMIN_USERNAME).strip().lstrip('@')
-    return f"https://t.me/{username}?text={urllib.parse.quote('Halo Admin, saya ingin upgrade akun bot AI ke Premium.')}"
-
-def clear_user_flow(user: dict) -> None:
-    for key in (
-        "music_menu_pending", "waiting_prompt", "waiting_style", "waiting_lyrics",
-        "pending_mode", "pending_style", "waiting_chat", "waiting_deepseek",
-        "waiting_chatgpt", "waiting_image", "waiting_upscale", "waiting_target_link",
-        "waiting_target_count", "waiting_broadcast", "waiting_video_prompt", 
-        "waiting_video_duration_secs", "waiting_download_link", "waiting_mp3_link", 
-        "waiting_redeem_input", "waiting_suggestion_input", "selected_video_engine", 
-        "waiting_custom_engine_prompt", "waiting_reaction_link", "selected_reaction_link", 
-        "selected_reaction_count", "waiting_telegram_id_input", "waiting_custom_admin_notice",
-        "waiting_location_share"
-    ):
-        user.pop(key, None)
+    text_pesan = "Halo Admin, saya ingin membeli saldo / Premium Anonymeet Pilihan Pasangan."
+    return f"https://t.me/{username}?text={urllib.parse.quote(text_pesan)}"
 
 def get_user_data(user_id: int) -> dict:
     s_id = str(user_id)
@@ -154,13 +135,9 @@ def get_user_data(user_id: int) -> dict:
         USERS_DB[s_id] = {
             "status": "ADMIN" if is_adm else "FREE",
             "saldo": 50000 if is_adm else 0,
-            "music": 10 if is_adm else 1,
-            "daily_limit": 999 if is_adm else 3,
             "points": 99999 if is_adm else 50,
-            "bonus_expire_time": 0,
-            "last_claim_date": "",
-            "reaction_count": 0,
-            "reaction_date": ""
+            "anonymeet_premium_expire": 0,
+            "preferred_gender": None,
         }
         save_db(GLOBAL_DB)
     return USERS_DB[s_id]
@@ -171,32 +148,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user = get_user_data(user_id)
     is_adm = is_admin(user_id)
-    is_prem = is_premium_or_admin(user_id)
+    is_prem = is_anonymeet_premium(user_id)
 
-    status_text = "👑 ADMIN / PREMIUM" if is_prem else "👤 FREE (Terkunci)"
+    status_text = "👑 PREMIUM ANONYMEET" if is_prem else "👤 FREE (Random)"
     points = user.get('points', 50)
+    saldo = user.get('saldo', 0)
 
     menu = [
         [InlineKeyboardButton("👥 Cari Pasangan (Anonymeet)", callback_data="anonymeet_start")],
         [InlineKeyboardButton("📞 Voice Random Call (Telepon Suara)", callback_data="voice_random_menu")],
-        [InlineKeyboardButton("📍 Cari Pasangan Terdekat (GPS)", callback_data="anonymeet_nearby_menu")],
-        [InlineKeyboardButton("❤️ Reaksi Channel Telegram", callback_data="reaction_menu")],
-        [InlineKeyboardButton("🎵 Buat Musik AI", callback_data="music"), InlineKeyboardButton("🎥 Buat Video AI (Engine)", callback_data="video_menu")],
-        [InlineKeyboardButton("📥 Download Video", callback_data="download_zip_menu"), InlineKeyboardButton("🎧 Download MP3 HD", callback_data="mp3_download_menu")],
-        [InlineKeyboardButton("🔍 Lacak ID Telegram", callback_data="menu_lacak_id"), InlineKeyboardButton("📱 Cek Nomor Telepon", callback_data="menu_get_phone")],
-        [InlineKeyboardButton("🎁 Redeem Code", callback_data="redeem_menu"), InlineKeyboardButton("💡 Beri Saran Menu", callback_data="suggestion_menu")],
-        [InlineKeyboardButton("💳 Cek Akun & Poin", callback_data="saldo")],
+        [InlineKeyboardButton("💎 Beli / Info Premium Anonymeet", callback_data="info_anonymeet_premium")],
+        [InlineKeyboardButton("💳 Cek Saldo & Akun", callback_data="saldo")],
         [InlineKeyboardButton("🆔 Cek ID Telegram", callback_data="check_id"), InlineKeyboardButton("💬 Hubungi Admin", url=admin_url())],
     ]
     if is_adm:
         menu.append([InlineKeyboardButton("👑 PANEL KONTROL ADMIN", callback_data="admin")])
 
     welcome_message = (
-        "🔥 **WELCOME TO BYMODZ ANONYMEET & AI STUDIO** 🔥\n\n"
-        "Cari teman ngobrol anonim, gunakan fitur AI canggih, unduhan pintar, dan komunitas interaktif dalam satu bot! 🚀\n\n"
+        "🔥 **WELCOME TO BYMODZ ANONYMEET & VOICE CALL** 🔥\n\n"
+        "Cari teman ngobrol anonim secara acak atau pilih gender bagi member premium! 🚀\n\n"
         f"• Status: `{status_text}`\n"
+        f"• Saldo: `Rp {saldo:,}`\n"
         f"• Poin: `🪙 {points}`\n\n"
-        "💡 *Pilih menu di bawah atau klik tombol untuk memulai:*"
+        "💡 *Pilih menu di bawah untuk memulai:*"
     )
 
     if update.callback_query:
@@ -208,64 +182,137 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def trigger_find_partner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_obj = update.effective_message
+    user = get_user_data(user_id)
+    is_prem = is_anonymeet_premium(user_id)
+    pref_gender = user.get("preferred_gender")
 
     if WAITING_ANONYMOUS_QUEUE:
-        partner_id = WAITING_ANONYMOUS_QUEUE.pop(0)
-        if partner_id == user_id:
-            WAITING_ANONYMOUS_QUEUE.append(user_id)
-            await chat_obj.reply_text("🚀 Sedang mencari pasangan untuk Anda...\nMohon tunggu sebentar.")
-            return
+        # Cari partner dari antrean yang cocok dengan preferensi jika user premium
+        partner_idx = -1
+        for idx, queued in enumerate(WAITING_ANONYMOUS_QUEUE):
+            if queued["user_id"] == user_id:
+                continue
+            # Jika user premium dan menetapkan pilihan gender
+            if is_prem and pref_gender and pref_gender != "Semua":
+                if queued["gender"] == pref_gender:
+                    partner_idx = idx
+                    break
+            else:
+                partner_idx = idx
+                break
 
-        ACTIVE_ANONYMOUS_CHATS[user_id] = partner_id
-        ACTIVE_ANONYMOUS_CHATS[partner_id] = user_id
+        if partner_idx != -1:
+            matched_item = WAITING_ANONYMOUS_QUEUE.pop(partner_idx)
+            partner_id = matched_item["user_id"]
+            partner_gender = matched_item["gender"]
+            partner_country = matched_item["country"]
 
-        genders = ["Pria 👨", "Wanita 👩"]
-        gender_user = random.choice(genders)
-        gender_partner = "Pria 👨" if gender_user == "Wanita 👩" else "Wanita 👩"
+            ACTIVE_ANONYMOUS_CHATS[user_id] = partner_id
+            ACTIVE_ANONYMOUS_CHATS[partner_id] = user_id
 
-        user_tg = update.effective_user
-        _, country_user_str = get_country_info(user_tg)
+            user_gender = detect_user_gender(update.effective_user)
+            _, user_country = get_country_info(update.effective_user)
 
-        try:
-            partner_chat_member = await context.bot.get_chat(partner_id)
-            _, country_partner_str = get_country_info(partner_chat_member)
-        except Exception:
-            country_partner_str = "Indonesia 🇮🇩"
+            admin_notice = GLOBAL_DB.get("admin_broadcast_text", "🚀 Selamat datang di Anonymeet! Nikmati obrolan santai, jaga kesopanan, dan hormati privasi sesama pengguna.")
 
-        admin_notice = GLOBAL_DB.get("admin_broadcast_text", "🚀 Selamat datang di Anonymeet! Nikmati obrolan santai, jaga kesopanan, dan hormati privasi sesama pengguna.")
+            match_text_1 = (
+                f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
+                f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+                f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
+                f"• Gender Partner:\n`{partner_gender}`\n\n"
+                f"• Asal:\n`{partner_country}`\n\n"
+                f"💬 Silakan kirim pesan.\n"
+                f"• /next ➔ Ganti pasangan\n"
+                f"• /report ➔ Laporkan\n"
+                f"• /stop ➔ Keluar"
+            )
 
-        match_text_1 = (
-            f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
-            f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
-            f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
-            f"• Gender Partner:\n`{gender_partner}`\n\n"
-            f"• Asal:\n`{country_partner_str}`\n\n"
-            f"💬 Silakan kirim pesan. Ketik /next, /report, atau /stop."
-        )
+            match_text_2 = (
+                f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
+                f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+                f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
+                f"• Gender Partner:\n`{user_gender}`\n\n"
+                f"• Asal:\n`{user_country}`\n\n"
+                f"💬 Silakan kirim pesan.\n"
+                f"• /next ➔ Ganti pasangan\n"
+                f"• /report ➔ Laporkan\n"
+                f"• /stop ➔ Keluar"
+            )
 
-        match_text_2 = (
-            f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
-            f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
-            f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
-            f"• Gender Partner:\n`{gender_user}`\n\n"
-            f"• Asal:\n`{country_user_str}`\n\n"
-            f"💬 Silakan kirim pesan. Ketik /next, /report, atau /stop."
-        )
-
-        await chat_obj.reply_text(match_text_1, parse_mode="Markdown")
-        try:
-            await context.bot.send_message(chat_id=partner_id, text=match_text_2, parse_mode="Markdown")
-        except Exception:
-            pass
+            await chat_obj.reply_text(match_text_1, parse_mode="Markdown")
+            try:
+                await context.bot.send_message(chat_id=partner_id, text=match_text_2, parse_mode="Markdown")
+            except Exception:
+                pass
+        else:
+            # Masukkan ke antrean
+            user_gender = detect_user_gender(update.effective_user)
+            _, user_country = get_country_info(update.effective_user)
+            WAITING_ANONYMOUS_QUEUE.append({"user_id": user_id, "gender": user_gender, "country": user_country})
+            
+            notif_prem = "🟢 Anda berada di **Anonymeet Premium**. Pilihan gender aktif." if is_prem else "👤 Anda dalam mode **Free** (Pasangan Random Murni)."
+            admin_notice = GLOBAL_DB.get("admin_broadcast_text", "Selamat mengobrol!")
+            await chat_obj.reply_text(
+                f"🚀 **Sedang mencari pasangan anonim...**\n\n"
+                f"{notif_prem}\n\n"
+                f"📢 **Info Admin:** *{admin_notice}*\n\n"
+                "Mohon tunggu beberapa saat.",
+                parse_mode="Markdown"
+            )
     else:
-        WAITING_ANONYMOUS_QUEUE.append(user_id)
-        admin_notice = GLOBAL_DB.get("admin_broadcast_text", "🚀 Selamat datang di Anonymeet! Nikmati obrolan santai, jaga kesopanan, dan hormati privasi sesama pengguna.")
+        user_gender = detect_user_gender(update.effective_user)
+        _, user_country = get_country_info(update.effective_user)
+        WAITING_ANONYMOUS_QUEUE.append({"user_id": user_id, "gender": user_gender, "country": user_country})
+        
+        notif_prem = "🟢 Anda berada di **Anonymeet Premium**." if is_prem else "👤 Anda dalam mode **Free** (Pasangan Random Murni)."
         await chat_obj.reply_text(
             f"🚀 **Sedang mencari pasangan anonim...**\n\n"
-            f"📢 **Info Admin:** *{admin_notice}*\n\n"
+            f"{notif_prem}\n\n"
             "Mohon tunggu beberapa saat.",
             parse_mode="Markdown"
         )
+
+async def stop_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id in ACTIVE_ANONYMOUS_CHATS:
+        partner_id = ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
+        if partner_id in ACTIVE_ANONYMOUS_CHATS:
+            ACTIVE_ANONYMOUS_CHATS.pop(partner_id, None)
+            try:
+                await context.bot.send_message(chat_id=partner_id, text="🔴 Pasangan Anda menutup percakapan. Ketik /start untuk mencari pasangan baru.")
+            except Exception:
+                pass
+        await update.message.reply_text("🔴 Percakapan anonim diakhiri. Ketik /start untuk mencari pasangan baru.")
+    else:
+        await update.message.reply_text("❌ Anda sedang tidak terhubung dalam percakapan aktif.")
+
+async def next_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id in ACTIVE_ANONYMOUS_CHATS:
+        partner_id = ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
+        if partner_id in ACTIVE_ANONYMOUS_CHATS:
+            ACTIVE_ANONYMOUS_CHATS.pop(partner_id, None)
+            try:
+                await context.bot.send_message(chat_id=partner_id, text="🔄 Pasangan Anda beralih ke sesi lain.")
+            except Exception:
+                pass
+    WAITING_ANONYMOUS_QUEUE[:] = [item for item in WAITING_ANONYMOUS_QUEUE if item["user_id"] != user_id]
+    await update.message.reply_text("🔄 **Mencari pasangan baru...**")
+    await trigger_find_partner(update, context)
+
+async def report_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    if user_id not in ACTIVE_ANONYMOUS_CHATS:
+        await update.message.reply_text("❌ Anda sedang tidak berada dalam sesi percakapan anonim.")
+        return
+    partner_id = ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
+    if partner_id in ACTIVE_ANONYMOUS_CHATS:
+        ACTIVE_ANONYMOUS_CHATS.pop(partner_id, None)
+    await update.message.reply_text("✅ Laporan diterima. Sesi diakhiri.")
+    try:
+        await context.bot.send_message(chat_id=partner_id, text="⚠️ Partner melaporkan sesi ini. Sesi ditutup.")
+    except Exception:
+        pass
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -280,7 +327,50 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if user_id in ACTIVE_ANONYMOUS_CHATS:
             await query.message.reply_text("⚠️ Anda sedang terhubung dalam sesi obrolan!")
             return
+        
+        is_prem = is_anonymeet_premium(user_id)
+        if is_prem:
+            # Tampilkan pilihan gender bagi member premium
+            await query.message.reply_text(
+                "🟢 **ANDA BERADA DI ANONYMEET PREMIUM**\n\n"
+                "Silakan pilih gender pasangan yang Anda inginkan untuk obrolan ini:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("👨 Pria", callback_data="pref_pria"), InlineKeyboardButton("👩 Wanita", callback_data="pref_wanita")],
+                    [InlineKeyboardButton("🌐 Bebas / Random", callback_data="pref_semua")]
+                ]),
+                parse_mode="Markdown"
+            )
+        else:
+            user["preferred_gender"] = "Semua"
+            await trigger_find_partner(update, context)
+        return
+
+    if data.startswith("pref_"):
+        await query.answer()
+        pref_map = {"pref_pria": "Pria 👨", "pref_wanita": "Wanita 👩", "pref_semua": "Semua"}
+        user["preferred_gender"] = pref_map.get(data, "Semua")
+        await query.message.edit_text(f"✅ Preferensi gender disimpan: **{user['preferred_gender']}**. Memulai pencarian...")
         await trigger_find_partner(update, context)
+        return
+
+    if data == "info_anonymeet_premium":
+        await query.answer()
+        await query.message.reply_text(
+            "💎 **PREMIUM ANONYMEET (PILIHAN PASANGAN)**\n\n"
+            "Nikmati fitur eksklusif untuk memilih gender pasangan sesuai keinginan Anda!\n\n"
+            "📋 **Daftar Harga & Durasi:**\n"
+            "• **7 Hari** ➔ Rp 5.000\n"
+            "• **30 Hari (1 Bulan)** ➔ Rp 15.000\n"
+            "• **90 Hari (3 Bulan)** ➔ Rp 35.000\n"
+            "• **180 Hari (6 Bulan)** ➔ Rp 60.000\n"
+            "• **365 Hari (1 Tahun)** ➔ Rp 100.000\n\n"
+            "💬 *Silakan hubungi Admin untuk melakukan pembelian saldo atau aktivasi paket premium:*",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Hubungi Admin", url=admin_url())],
+                [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
+            ]),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "voice_random_menu":
@@ -298,85 +388,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    if data == "anonymeet_nearby_menu":
-        await query.answer()
-        user["waiting_location_share"] = True
-        loc_keyboard = [[KeyboardButton("📍 Bagikan Lokasi Saya Sekarang", request_location=True)]]
-        await query.message.reply_text(
-            "📍 **CARI PASANGAN TERDEKAT (GPS)**\n\nKlik tombol di bawah untuk membagikan lokasi:",
-            reply_markup=ReplyKeyboardMarkup(loc_keyboard, resize_keyboard=True, one_time_keyboard=True)
-        )
-        return
-
-    if data == "menu_lacak_id":
-        await query.answer()
-        user["waiting_telegram_id_input"] = True
-        await query.message.reply_text("🔍 Masukkan **Telegram ID** target yang ingin dilacak:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="main_menu")]]))
-        return
-
-    if data == "menu_get_phone":
-        await query.answer()
-        contact_keyboard = [[KeyboardButton("📱 Bagikan Nomor Telepon", request_contact=True)]]
-        await query.message.reply_text("📱 Klik tombol di bawah untuk cek nomor:", reply_markup=ReplyKeyboardMarkup(contact_keyboard, resize_keyboard=True, one_time_keyboard=True))
-        return
-
-    if data == "reaction_menu":
-        await query.answer()
-        user["waiting_reaction_link"] = True
-        await query.message.reply_text("❤️ Kirimkan link postingan channel Telegram:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Batal", callback_data="main_menu")]]))
-        return
-
-    if data == "music":
-        await query.answer()
-        user["waiting_prompt"] = True
-        await query.message.reply_text("🎵 Tuliskan ide lagu Anda:")
-        return
-
-    if data == "video_menu":
-        await query.answer()
-        user["selected_video_engine"] = "gemini"
-        user["waiting_custom_engine_prompt"] = True
-        await query.message.reply_text("🎥 Masukkan ide / topik video AI:")
-        return
-
-    if data == "mp3_download_menu":
-        await query.answer()
-        user["waiting_mp3_link"] = True
-        await query.message.reply_text("🎧 Kirimkan link musik untuk diunduh ke MP3:")
-        return
-
-    if data == "download_zip_menu":
-        await query.answer()
-        user["waiting_download_link"] = True
-        await query.message.reply_text("📥 Kirimkan link video untuk diunduh:")
-        return
-
-    if data == "redeem_menu":
-        await query.answer()
-        user["waiting_redeem_input"] = True
-        await query.message.reply_text("🎁 Masukkan kode redeem VIP Anda:")
-        return
-
-    if data == "suggestion_menu":
-        await query.answer()
-        user["waiting_suggestion_input"] = True
-        await query.message.reply_text("💡 Ketik saran / fitur baru untuk bot ini:")
-        return
-
     if data == "saldo":
         await query.answer()
-        await query.message.reply_text(f"💳 **AKUN & POIN**\n• Status: `{user['status']}`\n• Poin: `🪙 {user.get('points', 0)}`", parse_mode="Markdown")
-        return
-
-    if data == "check_id":
-        await query.answer()
-        await query.message.reply_text(f"🆔 Telegram ID Anda: `{query.from_user.id}`", parse_mode="Markdown")
-        return
-
-    if data == "admin":
-        if not is_admin(user_id): return
-        await query.answer()
-        await query.message.reply_text("👑 Panel Admin Aktif.", parse_mode="Markdown")
+        await query.message.reply_text(
+            f"💳 **INFORMASI SALDO & AKUN**\n\n"
+            f"• Saldo Anda: `Rp {user.get('saldo', 0):,}`\n"
+            f"• Status Anonymeet: `{'PREMIUM' if is_anonymeet_premium(user_id) else 'FREE'}`",
+            parse_mode="Markdown"
+        )
         return
 
     if data == "main_menu":
@@ -388,31 +407,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = update.effective_user.id
     if is_banned(user_id): return
 
-    user = get_user_data(user_id)
     text = update.message.text.strip() if update.message.text else ""
 
     if user_id in ACTIVE_ANONYMOUS_CHATS:
         partner_id = ACTIVE_ANONYMOUS_CHATS[user_id]
         if text.lower() == "/stop":
-            ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
-            ACTIVE_ANONYMOUS_CHATS.pop(partner_id, None)
-            await update.message.reply_text("🔴 Percakapan diakhiri.")
-            try:
-                await context.bot.send_message(chat_id=partner_id, text="🔴 Partner mengakhiri percakapan.")
-            except Exception:
-                pass
+            await stop_chat_cmd(update, context)
+            return
+        if text.lower() == "/next":
+            await next_chat_cmd(update, context)
+            return
+        if text.lower() == "/report":
+            await report_chat_cmd(update, context)
             return
         try:
             await context.bot.send_message(chat_id=partner_id, text=text)
         except Exception:
             pass
-        return
-
-    if user.get("waiting_suggestion_input"):
-        user.pop("waiting_suggestion_input", None)
-        SUGGESTIONS_DB.append({"user_id": user_id, "text": text})
-        save_db(GLOBAL_DB)
-        await update.message.reply_text("✅ Saran berhasil dikirim ke admin!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]]))
         return
 
     await update.message.reply_text("Silakan gunakan tombol menu atau ketik /start.")
@@ -421,16 +432,22 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
         BotCommand("start", "Menu Utama"),
         BotCommand("menu", "Tampilkan Menu"),
+        BotCommand("next", "Ganti pasangan baru"),
+        BotCommand("stop", "Akhiri percakapan"),
+        BotCommand("report", "Laporkan partner"),
     ])
 
 def main() -> None:
     app = Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", start))
+    app.add_handler(CommandHandler("next", next_chat_cmd))
+    app.add_handler(CommandHandler("stop", stop_chat_cmd))
+    app.add_handler(CommandHandler("report", report_chat_cmd))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🤖 BOT BERJALAN SEMPURNA!")
+    print("🤖 BOT BERJALAN DENGAN FITUR PREMIUM ANONYMEET!")
     app.run_polling()
 
 if __name__ == "__main__":
