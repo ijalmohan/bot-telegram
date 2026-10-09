@@ -68,10 +68,12 @@ SUGGESTIONS_DB = GLOBAL_DB.setdefault("suggestions", [])
 BANNED_USERS_DB = GLOBAL_DB.setdefault("banned_users", [])
 ANONYMEET_BANS_DB = GLOBAL_DB.setdefault("anonymeet_bans", {})
 
-WAITING_ANONYMOUS_QUEUE = []        # Antrean acak
-WAITING_LOCATION_QUEUE = []       # Antrean berbasis lokasi [{user_id, lat, lon}, ...]
-ACTIVE_ANONYMOUS_CHATS = {}       # user_id -> partner_id
-CHAT_HISTORY_LOGS = {}            # user_id -> list of recent messages
+WAITING_ANONYMOUS_QUEUE = []
+WAITING_LOCATION_QUEUE = []
+WAITING_VOICE_QUEUE = []          # Antrean khusus Voice Random Call
+ACTIVE_ANONYMOUS_CHATS = {}       # user_id -> partner_id (Teks)
+ACTIVE_VOICE_CHATS = {}           # user_id -> partner_id (Voice Call Mode)
+CHAT_HISTORY_LOGS = {}
 
 STRICT_ADULT_KEYWORDS = [
     "porno", "kontol", "memek", "ngentot", "colmek", "colok",
@@ -94,8 +96,7 @@ def get_country_info(user) -> tuple[str, str]:
         return "International", "International 🌍"
 
 def calculate_distance(lat1, lon1, lat2, lon2):
-    """Menghitung jarak dalam kilometer menggunakan Haversine Formula"""
-    R = 6371.0 # Radius bumi dalam km
+    R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
@@ -198,6 +199,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception:
                 pass
 
+    if user_id in ACTIVE_VOICE_CHATS:
+        partner_id = ACTIVE_VOICE_CHATS.pop(user_id, None)
+        if partner_id in ACTIVE_VOICE_CHATS:
+            ACTIVE_VOICE_CHATS.pop(partner_id, None)
+            try:
+                await context.bot.send_message(
+                    chat_id=partner_id,
+                    text="🔴 Panggilan suara diakhiri oleh partner."
+                )
+            except Exception:
+                pass
+
     user = get_user_data(user_id)
     is_adm = is_admin(user_id)
     is_perm = is_permanent_premium(user_id)
@@ -219,6 +232,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     menu = [
         [InlineKeyboardButton("👥 Cari Pasangan (Anonymeet)", callback_data="anonymeet_start")],
+        [InlineKeyboardButton("📞 Voice Random Call (Telepon Suara)", callback_data="voice_random_menu")],
         [InlineKeyboardButton("📍 Cari Pasangan Terdekat (GPS)", callback_data="anonymeet_nearby_menu")],
         [InlineKeyboardButton("❤️ Reaksi Channel Telegram", callback_data="reaction_menu")],
         [InlineKeyboardButton("🎵 Buat Musik AI", callback_data="music"), InlineKeyboardButton("🎥 Buat Video AI (Engine)", callback_data="video_menu")],
@@ -371,6 +385,48 @@ async def trigger_find_partner(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="Markdown"
         )
 
+async def trigger_find_voice_partner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_obj = update.effective_message
+
+    if user_id in WAITING_VOICE_QUEUE:
+        await chat_obj.reply_text("⏳ Anda sudah berada di antrean panggilan suara...")
+        return
+
+    if WAITING_VOICE_QUEUE:
+        partner_id = WAITING_VOICE_QUEUE.pop(0)
+        if partner_id == user_id:
+            WAITING_VOICE_QUEUE.append(user_id)
+            await chat_obj.reply_text("📞 Mencari partner suara acak...\nMohon tunggu sebentar.")
+            return
+
+        ACTIVE_VOICE_CHATS[user_id] = partner_id
+        ACTIVE_VOICE_CHATS[partner_id] = user_id
+
+        voice_controls = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Next Partner (Cari Lagi)", callback_data="voice_next"),
+             InlineKeyboardButton("☎️ Matikan Telepon", callback_data="voice_stop")]
+        ])
+
+        call_text = (
+            "📞 **PANGGILAN TELEPON SUARA TERHUBUNG!**\n\n"
+            "• Anda kini terhubung dalam saluran suara anonim.\n"
+            "• Silakan kirim pesan suara (*voice note* / voice chat) ke partner Anda.\n"
+            "• Gunakan tombol di bawah untuk mengganti partner atau mengakhiri panggilan:"
+        )
+
+        await chat_obj.reply_text(call_text, reply_markup=voice_controls, parse_mode="Markdown")
+        try:
+            await context.bot.send_message(chat_id=partner_id, text=call_text, reply_markup=voice_controls, parse_mode="Markdown")
+        except Exception:
+            pass
+    else:
+        WAITING_VOICE_QUEUE.append(user_id)
+        await chat_obj.reply_text(
+            "📞 **Mencari partner telepon suara acak...**\nMohon tunggu beberapa saat hingga partner ditemukan.",
+            parse_mode="Markdown"
+        )
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user_id = query.from_user.id
@@ -383,10 +439,78 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if data == "anonymeet_start":
         await query.answer()
-        if user_id in ACTIVE_ANONYMOUS_CHATS:
-            await query.message.reply_text("⚠️ Anda sedang terhubung dengan seseorang! Ketik /next, /stop, atau /report terlebih dahulu.")
+        if user_id in ACTIVE_ANONYMOUS_CHATS or user_id in ACTIVE_VOICE_CHATS:
+            await query.message.reply_text("⚠️ Anda sedang terhubung dalam sesi obrolan/telepon! Selesaikan atau akhiri terlebih dahulu.")
             return
         await trigger_find_partner(update, context)
+        return
+
+    if data == "voice_random_menu":
+        await query.answer()
+        clear_user_flow(user)
+        await query.message.reply_text(
+            "📞 **VOICE RANDOM CALL (TELEPON SUARA)**\n\n"
+            "Nikmati obrolan suara anonim dengan pengguna lain secara acak.\n\n"
+            "Untuk mulai mengobrol, tekan tombol **‘Mulai Mengobrol’** di bagian bawah.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎙️ Mulai Mengobrol", callback_data="voice_start_queue")],
+                [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
+            ]),
+            parse_mode="Markdown"
+        )
+        return
+
+    if data == "voice_start_queue":
+        await query.answer()
+        if user_id in ACTIVE_VOICE_CHATS:
+            await query.message.reply_text("⚠️ Anda sedang dalam panggilan suara!")
+            return
+        await trigger_find_voice_partner(update, context)
+        return
+
+    if data == "voice_next":
+        await query.answer("🔄 Mencari pasangan suara baru...")
+        if user_id in ACTIVE_VOICE_CHATS:
+            partner_id = ACTIVE_VOICE_CHATS.pop(user_id, None)
+            if partner_id in ACTIVE_VOICE_CHATS:
+                ACTIVE_VOICE_CHATS.pop(partner_id, None)
+                try:
+                    await context.bot.send_message(
+                        chat_id=partner_id,
+                        text="🔄 Partner Anda berpindah ke panggilan lain (Next)."
+                    )
+                except Exception:
+                    pass
+
+        if user_id in WAITING_VOICE_QUEUE:
+            WAITING_VOICE_QUEUE.remove(user_id)
+
+        await query.message.reply_text("🔄 **Mencari partner suara baru...**")
+        await trigger_find_voice_partner(update, context)
+        return
+
+    if data == "voice_stop":
+        await query.answer("☎️ Panggilan ditutup.")
+        if user_id in ACTIVE_VOICE_CHATS:
+            partner_id = ACTIVE_VOICE_CHATS.pop(user_id, None)
+            if partner_id in ACTIVE_VOICE_CHATS:
+                ACTIVE_VOICE_CHATS.pop(partner_id, None)
+                try:
+                    await context.bot.send_message(
+                        chat_id=partner_id,
+                        text="🔴 Partner menutup panggilan telepon suara."
+                    )
+                except Exception:
+                    pass
+
+        await query.message.reply_text(
+            "☎️ **Panggilan Suara Diakhiri.**\nKetik /start atau pilih menu utama untuk kembali.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📞 Telepon Suara Lagi", callback_data="voice_random_menu")],
+                [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
+            ]),
+            parse_mode="Markdown"
+        )
         return
 
     if data == "anonymeet_nearby_menu":
@@ -394,7 +518,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         clear_user_flow(user)
         user["waiting_location_share"] = True
         
-        # Buat tombol keyboard untuk meminta lokasi otomatis secara opsional
         loc_keyboard = [[KeyboardButton("📍 Bagikan Lokasi Saya Sekarang", request_location=True)]]
         reply_markup = ReplyKeyboardMarkup(loc_keyboard, resize_keyboard=True, one_time_keyboard=True)
         
@@ -402,7 +525,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "📍 **CARI PASANGAN TERDEKAT (GPS)**\n\n"
             "Bot akan menghubungkan Anda dengan pengguna lain yang berada di radius terdekat.\n\n"
             "• Jika Anda bersedia, silakan klik tombol **'📍 Bagikan Lokasi Saya Sekarang'** di bawah.\n"
-            "• Jika Anda **tidak ingin** membagikan lokasi, cukupabaikan pesan ini atau kembali ke menu utama.",
+            "• Jika Anda **tidak ingin** membagikan lokasi, cukup abaikan pesan ini atau kembali ke menu utama.",
             reply_markup=reply_markup
         )
         return
@@ -759,11 +882,43 @@ async def stop_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 [InlineKeyboardButton("👥 Cari Pasangan Lagi", callback_data="anonymeet_start")]
             ])
         )
+    elif user_id in ACTIVE_VOICE_CHATS:
+        partner_id = ACTIVE_VOICE_CHATS.pop(user_id, None)
+        if partner_id in ACTIVE_VOICE_CHATS:
+            ACTIVE_VOICE_CHATS.pop(partner_id, None)
+            try:
+                await context.bot.send_message(
+                    chat_id=partner_id,
+                    text="🔴 Panggilan suara diakhiri oleh partner."
+                )
+            except Exception:
+                pass
+        await update.message.reply_text(
+            "🔴 Panggilan suara diakhiri.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📞 Telepon Suara Lagi", callback_data="voice_random_menu")],
+                [InlineKeyboardButton("🔙 Menu Utama", callback_data="main_menu")]
+            ])
+        )
     else:
-        await update.message.reply_text("❌ Anda sedang tidak terhubung dalam percakapan anonim.")
+        await update.message.reply_text("❌ Anda sedang tidak terhubung dalam percakapan atau panggilan aktif.")
 
 async def next_chat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    if user_id in ACTIVE_VOICE_CHATS:
+        partner_id = ACTIVE_VOICE_CHATS.pop(user_id, None)
+        if partner_id in ACTIVE_VOICE_CHATS:
+            ACTIVE_VOICE_CHATS.pop(partner_id, None)
+            try:
+                await context.bot.send_message(chat_id=partner_id, text="🔄 Partner Anda beralih ke panggilan suara lain.")
+            except Exception:
+                pass
+        if user_id in WAITING_VOICE_QUEUE:
+            WAITING_VOICE_QUEUE.remove(user_id)
+        await update.message.reply_text("🔄 **Mencari partner suara baru...**")
+        await trigger_find_voice_partner(update, context)
+        return
+
     if user_id in ACTIVE_ANONYMOUS_CHATS:
         partner_id = ACTIVE_ANONYMOUS_CHATS.pop(user_id, None)
         if partner_id in ACTIVE_ANONYMOUS_CHATS:
@@ -868,13 +1023,11 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     loc = update.message.location
     lat, lon = loc.latitude, loc.longitude
 
-    # Cek apakah ada pengguna lain di antrean lokasi
     matched_partner = None
     for idx, waiting_item in enumerate(WAITING_LOCATION_QUEUE):
         p_id = waiting_item["user_id"]
         p_lat, p_lon = waiting_item["lat"], waiting_item["lon"]
         
-        # Hitung jarak (misal dalam radius <= 30 km dianggap dekat)
         dist = calculate_distance(lat, lon, p_lat, p_lon)
         if dist <= 30.0:
             matched_partner = WAITING_LOCATION_QUEUE.pop(idx)
@@ -950,6 +1103,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ]),
             parse_mode="Markdown"
         )
+        return
+
+    # Penanganan pesan saat dalam mode Voice Call (meneruskan suara/pesan ke partner)
+    if user_id in ACTIVE_VOICE_CHATS:
+        partner_id = ACTIVE_VOICE_CHATS[user_id]
+        if text.lower() == "/stop":
+            await stop_chat_cmd(update, context)
+            return
+        if text.lower() == "/next":
+            await next_chat_cmd(update, context)
+            return
+
+        try:
+            # Meneruskan voice note, audio, atau pesan teks di dalam telepon suara
+            if update.message.voice or update.message.audio or update.message.video_note:
+                await update.message.copy(chat_id=partner_id)
+            elif update.message.text:
+                await context.bot.send_message(chat_id=partner_id, text=f"[Suara/Chat]: {text}")
+        except Exception:
+            await update.message.reply_text("❌ Gagal mengirim ke partner telepon.")
         return
 
     if user_id in ACTIVE_ANONYMOUS_CHATS:
@@ -1185,9 +1358,9 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.ANIMATION | filters.Sticker.ALL, handle_message))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.ANIMATION | filters.Sticker.ALL | filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, handle_message))
 
-    print("🤖 BOT ANONYMEET GPS NEARBY & SMART FEATURES BERJALAN SEMPURNA!")
+    print("🤖 BOT ANONYMEET VOICE RANDOM CALL & FULL FEATURES BERJALAN SEMPURNA!")
     app.run_polling()
 
 if __name__ == "__main__":
