@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voice Random Call - Real WebRTC</title>
+    <title>Voice Random Call</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         body {
@@ -18,25 +18,25 @@
             justify-content: space-between;
             height: 90vh;
         }
-        .header { font-size: 22px; font-weight: bold; margin-top: 10px; color: #58a6ff; }
+        .header { font-size: 20px; font-weight: bold; margin-top: 10px; color: #58a6ff; }
         .card {
             background: #161b22;
             border: 1px solid #30363d;
-            padding: 30px 20px;
+            padding: 20px;
             border-radius: 20px;
             margin: auto 0;
             box-shadow: 0 8px 24px rgba(0,0,0,0.5);
         }
-        .status { font-size: 20px; font-weight: bold; margin-bottom: 10px; }
-        .sub { font-size: 14px; color: #8b949e; margin-bottom: 25px; }
+        .status { font-size: 18px; font-weight: bold; margin-bottom: 8px; }
+        .sub { font-size: 13px; color: #8b949e; margin-bottom: 15px; word-break: break-all; }
         
         .wave-container {
             display: flex;
             justify-content: center;
             align-items: center;
             gap: 5px;
-            height: 40px;
-            margin: 20px 0;
+            height: 35px;
+            margin: 15px 0;
             display: none;
         }
         .wave {
@@ -51,15 +51,15 @@
         .wave:nth-child(4) { animation-delay: 0.6s; }
         @keyframes pulse {
             0% { height: 10px; background: #238636; }
-            100% { height: 35px; background: #2ea043; }
+            100% { height: 30px; background: #2ea043; }
         }
 
-        .btn-group { display: flex; flex-direction: column; gap: 12px; }
+        .btn-group { display: flex; flex-direction: column; gap: 10px; }
         .btn {
             background-color: #238636;
             color: white;
             border: none;
-            padding: 15px;
+            padding: 14px;
             font-size: 16px;
             border-radius: 12px;
             cursor: pointer;
@@ -76,7 +76,7 @@
     
     <div class="card">
         <div class="status" id="statusText">Siap Mencari Partner</div>
-        <div class="sub" id="subText">Tekan tombol di bawah untuk mulai menelepon secara acak.</div>
+        <div class="sub" id="subText">Tekan tombol di bawah untuk mulai.</div>
         
         <div class="wave-container" id="waveBox">
             <div class="wave"></div>
@@ -100,33 +100,35 @@
         let localStream = null;
         let peerConnection = null;
 
-        // Konfigurasi STUN server gratis Google untuk melewati jaringan NAT/router
         const rtcConfig = {
-            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
         };
 
-        // Ganti dengan URL WebSocket server Anda setelah di-deploy (Ganti wss:// dengan ws:// jika tidak pakai SSL, atau wss:// untuk production)
-        const WS_SERVER_URL = "wss://bot-telegram-production-c67c.up.railway.app"; 
+        // Pastikan URL WebSocket Railway Anda benar di bawah ini:
+        const WS_SERVER_URL = "wss://bot-telegram-production-c67c.up.railway.app";
 
         async function startCall() {
             try {
-                document.getElementById("statusText").innerText = "Meminta Izin Mikrofon...";
-                document.getElementById("subText").innerText = "Harap izinkan akses mikrofon.";
+                document.getElementById("statusText").innerText = "Meminta Mikrofon...";
+                document.getElementById("subText").innerText = "Izinkan akses mikrofon perangkat Anda.";
                 
                 localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
 
-                document.getElementById("statusText").innerText = "Mencari Partner...";
-                document.getElementById("subText").innerText = "Menghubungkan ke server antrean...";
+                document.getElementById("statusText").innerText = "Menghubungkan Server...";
+                document.getElementById("subText").innerText = "Menghubungkan ke WebSocket...";
                 document.getElementById("waveBox").style.display = "flex";
 
                 document.getElementById("controls").innerHTML = `
-                    <button class="btn btn-secondary" onclick="nextPartner()">🔄 Ganti / Next Partner</button>
+                    <button class="btn btn-secondary" onclick="nextPartner()">🔄 Ganti Partner</button>
                     <button class="btn btn-danger" onclick="endCall()">☎️ Matikan Telepon</button>
                 `;
 
                 connectWebSocket();
             } catch (err) {
-                alert("Gagal mengakses mikrofon!");
+                alert("Gagal mengakses mikrofon: " + err.message);
                 endCall();
             }
         }
@@ -135,20 +137,25 @@
             ws = new WebSocket(WS_SERVER_URL);
 
             ws.onopen = () => {
+                document.getElementById("statusText").innerText = "Mencari Partner...";
+                document.getElementById("subText").innerText = "Terhubung ke server. Mencari antrean...";
                 ws.send(JSON.stringify({ type: 'find' }));
+            };
+
+            ws.onerror = (err) => {
+                document.getElementById("subText").innerText = "Error WebSocket! Periksa URL server.";
             };
 
             ws.onmessage = async (event) => {
                 const message = JSON.parse(event.data);
 
                 if (message.type === 'waiting') {
-                    document.getElementById("statusText").innerText = "Mencari Partner Suara...";
-                    document.getElementById("subText").innerText = "Menunggu pengguna lain bergabung...";
+                    document.getElementById("statusText").innerText = "Menunggu Partner...";
+                    document.getElementById("subText").innerText = "Mencari pengguna lain yang online...";
                 } 
                 else if (message.type === 'matched') {
                     document.getElementById("statusText").innerText = "TERHUBUNG DENGAN ORANG BARU 🟢";
-                    document.getElementById("subText").innerText = "Berbicara secara langsung...";
-                    
+                    document.getElementById("subText").innerText = "Saluran suara aktif.";
                     setupPeerConnection(message.role);
                 } 
                 else if (message.type === 'offer') {
@@ -167,7 +174,7 @@
                     }
                 } 
                 else if (message.type === 'peer_disconnected' || message.type === 'ended') {
-                    resetCallState("Partner meninggalkan panggilan.");
+                    resetCallState("Partner terputus.");
                 }
             };
         }
@@ -175,12 +182,10 @@
         function setupPeerConnection(role) {
             peerConnection = new RTCPeerConnection(rtcConfig);
 
-            // Tambahkan track audio lokal ke koneksi
             localStream.getTracks().forEach(track => {
                 peerConnection.addTrack(track, localStream);
             });
 
-            // Tangkap suara dari partner (remote user)
             peerConnection.ontrack = (event) => {
                 const remoteAudio = document.getElementById("remoteAudio");
                 remoteAudio.srcObject = event.streams[0];
@@ -206,7 +211,7 @@
                 peerConnection = null;
             }
             document.getElementById("statusText").innerText = "Mencari Partner Baru...";
-            document.getElementById("subText").innerText = "Memindah saluran suara...";
+            document.getElementById("subText").innerText = "Memindah saluran...";
             if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: 'next' }));
             }
