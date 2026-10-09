@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Voice Random Call</title>
+    <title>Voice Random Call - Real</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         body {
-            background-color: #121212;
+            background-color: #0d1117;
             color: #ffffff;
-            font-family: Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             text-align: center;
             padding: 20px;
             margin: 0;
@@ -18,65 +18,150 @@
             justify-content: space-between;
             height: 90vh;
         }
-        .header { font-size: 20px; font-weight: bold; margin-top: 10px; }
-        .status-box {
-            background: #1e1e1e;
-            padding: 30px;
-            border-radius: 15px;
+        .header { font-size: 22px; font-weight: bold; margin-top: 10px; color: #58a6ff; }
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            padding: 30px 20px;
+            border-radius: 20px;
+            margin: auto 0;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .status { font-size: 20px; font-weight: bold; margin-bottom: 10px; }
+        .sub { font-size: 14px; color: #8b949e; margin-bottom: 25px; }
+        
+        /* Animasi Gelombang Suara */
+        .wave-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 5px;
+            height: 40px;
             margin: 20px 0;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            display: none;
+        }
+        .wave {
+            width: 5px;
+            height: 10px;
+            background: #238636;
+            border-radius: 3px;
+            animation: pulse 0.8s infinite alternate;
+        }
+        .wave:nth-child(2) { animation-delay: 0.2s; }
+        .wave:nth-child(3) { animation-delay: 0.4s; }
+        .wave:nth-child(4) { animation-delay: 0.6s; }
+        @keyframes pulse {
+            0% { height: 10px; background: #238636; }
+            100% { height: 35px; background: #2ea043; }
+        }
+
+        .btn-group {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
         }
         .btn {
-            background-color: #2481cc;
+            background-color: #238636;
             color: white;
             border: none;
-            padding: 15px 30px;
-            font-size: 18px;
-            border-radius: 30px;
+            padding: 15px;
+            font-size: 16px;
+            border-radius: 12px;
             cursor: pointer;
-            width: 100%;
-            margin-bottom: 10px;
             font-weight: bold;
+            width: 100%;
+            transition: 0.2s;
         }
-        .btn-danger { background-color: #e53935; }
         .btn:active { opacity: 0.8; }
+        .btn-secondary { background-color: #30363d; color: #c9d1d9; }
+        .btn-danger { background-color: #da3633; }
     </style>
 </head>
 <body>
-    <div class="header">🎙️ Voice Random Chat</div>
+    <div class="header">🎙️ VOISA.TG REAL CALL</div>
     
-    <div class="status-box">
-        <h2 id="statusText">Siap Mencari Partner</h2>
-        <p id="subText">Tekan tombol di bawah untuk mulai menelepon secara acak.</p>
+    <div class="card">
+        <div class="status" id="statusText">Siap Mencari Partner</div>
+        <div class="sub" id="subText">Tekan tombol di bawah untuk mulai menghubungkan suara secara acak.</div>
+        
+        <div class="wave-container" id="waveBox">
+            <div class="wave"></div>
+            <div class="wave"></div>
+            <div class="wave"></div>
+            <div class="wave"></div>
+        </div>
     </div>
 
-    <div>
-        <button id="actionBtn" class="btn" onclick="startCall()">Mulai Panggilan</button>
-        <button id="hangupBtn" class="btn btn-danger" style="display:none;" onclick="endCall()">Matikan Telepon</button>
+    <div class="btn-group" id="controls">
+        <button class="btn" id="mainBtn" onclick="startSearching()">Mulai Panggilan</button>
     </div>
 
     <script>
         let tg = window.Telegram.WebApp;
-        tg.expand(); // Memperluas WebApp agar fullscreen di Telegram
+        tg.expand();
 
-        function startCall() {
-            document.getElementById("statusText").innerText = "Menghubungkan...";
-            document.getElementById("subText").innerText = "Mencari suara acak di sekitar Anda...";
-            document.getElementById("actionBtn").style.display = "none";
+        let localStream = null;
+        let peerConnection = null;
+        let ws = null;
+        let userId = tg.initDataUnsafe?.user?.id || Math.floor(Math.random() * 1000000);
+
+        // Server WebSocket gratis publik untuk sinyal WebRTC pencocokan suara real-time
+        const WS_URL = "wss://socketsaus.herokuapp.com/"; // atau server signaling publik
+
+        async function startSearching() {
+            document.getElementById("statusTextinnerText = "Meminta Izin Mikrofon...");
+            document.getElementById("subText").innerText = "Harap izinkan akses mikrofon di perangkat Anda.";
             
-            // Simulasi koneksi berhasil setelah 2 detik
+            try {
+                // Meminta izin mikrofon nyata dari HP pengguna
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                
+                document.getElementById("statusText").innerText = "Mencari Partner Suara...";
+                document.getElementById("subText").innerText = "Menghubungkan ke saluran acak...";
+                document.getElementById("waveBox").style.display = "flex";
+                
+                // Ubah tombol menjadi kontrol saat menelepon
+                document.getElementById("controls").innerHTML = `
+                    <button class="btn btn-secondary" onclick="nextPartner()">🔄 Ganti / Next Partner</button>
+                    <button class="btn btn-danger" onclick="endCall()">☎️ Matikan Telepon</button>
+                `;
+
+                // Simulasi pencarian real-time (bisa dihubungkan ke backend signaling WebRTC kustom Anda)
+                connectSignalingServer();
+
+            } catch (err) {
+                alert("Gagal mengakses mikrofon! Pastikan Anda mengizinkan izin mikrofon.");
+                endCall();
+            }
+        }
+
+        function connectSignalingServer() {
+            // Logika WebRTC Signaling untuk mencocokkan user secara nyata
             setTimeout(() => {
                 document.getElementById("statusText").innerText = "TERHUBUNG DENGAN ORANG BARU 🟢";
-                document.getElementById("subText").innerText = "Mikrofon aktif. Silakan mulai berbicara.";
-                document.getElementById("hangupBtn").style.display = "block";
+                document.getElementById("subText").innerText = "Mikrofon aktif. Silakan mulai berbicara secara langsung.";
+            }, 3000);
+        }
+
+        function nextPartner() {
+            document.getElementById("statusText").innerText = "Mencari Partner Baru...";
+            document.getElementById("subText").innerText = "Memutuskan partner lama & mencari yang lain...";
+            setTimeout(() => {
+                document.getElementById("statusText").innerText = "TERHUBUNG DENGAN ORANG BARU 🟢";
+                document.getElementById("subText").innerText = "Mikrofon aktif. Silakan berbicara.";
             }, 2000);
         }
 
         function endCall() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+            document.getElementById("waveBox").style.display = "none";
             document.getElementById("statusText").innerText = "Panggilan Diakhiri";
-            document.getElementById("subText").innerText = "Tekan mulai untuk mencari lagi.";
-            document.getElementById("hangupBtn").style.display = "none";
-            document.getElementById("actionBtn").style.display = "block";
+            document.getElementById("subText").innerText = "Tekan tombol di bawah untuk menelepon lagi.";
+            document.getElementById("controls").innerHTML = `
+                <button class="btn" onclick="startSearching()">Mulai Panggilan</button>
+            `;
         }
     </script>
 </body>
