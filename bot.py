@@ -394,7 +394,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         clear_user_flow(user)
         
         # Ganti URL di bawah dengan link Web App (misal Vercel / Netlify / Railway) aplikasi telepon suara Anda
-        webapp_url = "https://your-voice-webapp-url.com"
+        webapp_url = "https://bot-telegram-nine-alpha.vercel.app/"
         
         await query.message.reply_text(
             "📞 **VOICE RANDOM CALL (TELEPON SUARA)**\n\n"
