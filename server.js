@@ -1,16 +1,20 @@
-const WebSocket = require('ws');
-const http = require('http');
 const express = require('express');
+const { WebSocketServer } = require('ws');
+const http = require('http');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss = new WebSocketServer({ server });
 
 let waitingQueue = [];
-const clients = new Map(); // ws -> partner_ws
+const clients = new Map();
+
+app.get('/', (req, res) => {
+    res.send('WebSocket Signaling Server is running!');
+});
 
 wss.on('connection', (ws) => {
-    console.log('Client terhubung.');
+    console.log('Client terhubung via WebSocket.');
 
     ws.on('message', (message) => {
         let data;
@@ -22,21 +26,15 @@ wss.on('connection', (ws) => {
 
         switch (data.type) {
             case 'find':
-                // Hapus dari antrean jika sudah ada sebelumnya
                 waitingQueue = waitingQueue.filter(item => item !== ws);
-
                 if (waitingQueue.length > 0) {
-                    // Ambil partner dari antrean terdepan
                     const partner = waitingQueue.shift();
-
-                    if (partner && partner.readyState === WebSocket.OPEN) {
+                    if (partner && partner.readyState === ws.OPEN) {
                         clients.set(ws, partner);
                         clients.set(partner, ws);
 
-                        // Kirim sinyal match (satu sebagai caller, satu sebagai callee)
                         ws.send(JSON.stringify({ type: 'matched', role: 'caller' }));
                         partner.send(JSON.stringify({ type: 'matched', role: 'callee' }));
-                        console.log('Pasangan ditemukan dan dihubungkan!');
                     } else {
                         waitingQueue.push(ws);
                         ws.send(JSON.stringify({ type: 'waiting' }));
@@ -44,17 +42,15 @@ wss.on('connection', (ws) => {
                 } else {
                     waitingQueue.push(ws);
                     ws.send(JSON.stringify({ type: 'waiting' }));
-                    console.log('User masuk antrean tunggu.');
                 }
                 break;
 
             case 'next':
                 disconnectPartner(ws);
-                // Masukkan kembali ke antrean pencarian
                 waitingQueue = waitingQueue.filter(item => item !== ws);
                 if (waitingQueue.length > 0) {
                     const partner = waitingQueue.shift();
-                    if (partner && partner.readyState === WebSocket.OPEN) {
+                    if (partner && partner.readyState === ws.OPEN) {
                         clients.set(ws, partner);
                         clients.set(partner, ws);
                         ws.send(JSON.stringify({ type: 'matched', role: 'caller' }));
@@ -73,7 +69,7 @@ wss.on('connection', (ws) => {
             case 'answer':
             case 'candidate':
                 const partner = clients.get(ws);
-                if (partner && partner.readyState === WebSocket.OPEN) {
+                if (partner && partner.readyState === ws.OPEN) {
                     partner.send(JSON.stringify(data));
                 }
                 break;
@@ -88,14 +84,13 @@ wss.on('connection', (ws) => {
     ws.on('close', () => {
         waitingQueue = waitingQueue.filter(item => item !== ws);
         disconnectPartner(ws);
-        console.log('Client terputus.');
     });
 });
 
 function disconnectPartner(ws) {
     const partner = clients.get(ws);
     if (partner) {
-        if (partner.readyState === WebSocket.OPEN) {
+        if (partner.readyState === ws.OPEN) {
             partner.send(JSON.stringify({ type: 'peer_disconnected' }));
         }
         clients.delete(partner);
@@ -105,5 +100,5 @@ function disconnectPartner(ws) {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Signaling server aktif di port ${PORT}`);
+    console.log(`Server berjalan di port ${PORT}`);
 });
