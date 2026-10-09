@@ -8,7 +8,6 @@ import random
 import os
 import json
 import time
-import websockets
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, BotCommand, WebAppInfo
 from telegram.ext import (
@@ -79,106 +78,14 @@ STRICT_ADULT_KEYWORDS = [
     "bokep", "nsfw", "open bo", "vcs", "pap tt", "pap memek", "sangean"
 ]
 
-# ==================== WEBSOCKET SIGNALING SERVER (PYTHON) ====================
-CONNECTED_CLIENTS = set()
-WAITING_WS_QUEUE = []
-CLIENT_PARTNERS = {}
-
-async def websocket_handler(websocket):
-    CONNECTED_CLIENTS.add(websocket)
-    print("Client terhubung via WebSocket Python.")
-    try:
-        async for raw_message in websocket:
-            try:
-                data = json.loads(raw_message)
-            except Exception:
-                continue
-
-            msg_type = data.get("type")
-
-            if msg_type == 'find':
-                if websocket in WAITING_WS_QUEUE:
-                    WAITING_WS_QUEUE.remove(websocket)
-                
-                if len(WAITING_WS_QUEUE) > 0:
-                    partner = WAITING_WS_QUEUE.pop(0)
-                    if partner in CONNECTED_CLIENTS:
-                        CLIENT_PARTNERS[websocket] = partner
-                        CLIENT_PARTNERS[partner] = websocket
-
-                        await websocket.send(json.dumps({'type': 'matched', 'role': 'caller'}))
-                        await partner.send(json.dumps({'type': 'matched', 'role': 'callee'}))
-                    else:
-                        WAITING_WS_QUEUE.append(websocket)
-                        await websocket.send(json.dumps({'type': 'waiting'}))
-                else:
-                    WAITING_WS_QUEUE.append(websocket)
-                    await websocket.send(json.dumps({'type': 'waiting'}))
-
-            elif msg_type == 'next':
-                disconnect_ws_partner(websocket)
-                if websocket in WAITING_WS_QUEUE:
-                    WAITING_WS_QUEUE.remove(websocket)
-
-                if len(WAITING_WS_QUEUE) > 0:
-                    partner = WAITING_WS_QUEUE.pop(0)
-                    if partner in CONNECTED_CLIENTS:
-                        CLIENT_PARTNERS[websocket] = partner
-                        CLIENT_PARTNERS[partner] = websocket
-                        await websocket.send(json.dumps({'type': 'matched', 'role': 'caller'}))
-                        await partner.send(json.dumps({'type': 'matched', 'role': 'callee'}))
-                    else:
-                        WAITING_WS_QUEUE.append(websocket)
-                        await websocket.send(json.dumps({'type': 'waiting'}))
-                else:
-                    WAITING_WS_QUEUE.append(websocket)
-                    await websocket.send(json.dumps({'type': 'waiting'}))
-
-            elif msg_type in ['offer', 'answer', 'candidate']:
-                partner = CLIENT_PARTNERS.get(websocket)
-                if partner and partner in CONNECTED_CLIENTS:
-                    await partner.send(json.dumps(data))
-
-            elif msg_type == 'hangup':
-                disconnect_ws_partner(websocket)
-                await websocket.send(json.dumps({'type': 'ended'}))
-
-    except websockets.exceptions.ConnectionClosed:
-        pass
-    finally:
-        CONNECTED_CLIENTS.discard(websocket)
-        if websocket in WAITING_WS_QUEUE:
-            WAITING_WS_QUEUE.remove(websocket)
-        disconnect_ws_partner(websocket)
-        print("Client terputus dari WebSocket.")
-
-def disconnect_ws_partner(ws):
-    partner = CLIENT_PARTNERS.get(ws)
-    if partner:
-        asyncio.create_task(safe_send_hangup(partner))
-        CLIENT_PARTNERS.pop(partner, None)
-        CLIENT_PARTNERS.pop(ws, None)
-
-async def safe_send_hangup(partner_ws):
-    try:
-        if partner_ws in CONNECTED_CLIENTS:
-            await partner_ws.send(json.dumps({'type': 'peer_disconnected'}))
-    except Exception:
-        pass
-
-async def start_websocket_server():
-    port = int(os.environ.get("PORT", 3000))
-    async with websockets.serve(websocket_handler, "0.0.0.0", port):
-        print(f"🚀 WebSocket Signaling Server aktif di port {port}")
-        await asyncio.Future()
-
-# ==================== TELEGRAM BOT LOGIC ====================
 def get_country_info(user) -> tuple[str, str]:
     lang_code = (user.language_code or "").lower()
     if "id" in lang_code:
         return "Indonesia", "Indonesia 🇮🇩"
     elif "en" in lang_code:
         return "Global / English", "Global 🌐"
+    elif "ms" in lang_code:
+        return "Malaysia", "Malaysia 🇲🇾"
     else:
         return "International", "International 🌍"
 
@@ -264,7 +171,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     user = get_user_data(user_id)
     is_adm = is_admin(user_id)
-    is_perm = is_permanent_premium(user_id)
     is_prem = is_premium_or_admin(user_id)
 
     status_text = "👑 ADMIN / PREMIUM" if is_prem else "👤 FREE (Terkunci)"
@@ -313,14 +219,53 @@ async def trigger_find_partner(update: Update, context: ContextTypes.DEFAULT_TYP
         ACTIVE_ANONYMOUS_CHATS[user_id] = partner_id
         ACTIVE_ANONYMOUS_CHATS[partner_id] = user_id
 
-        await chat_obj.reply_text("✨ **Pasangan Anonim Ditemukan!** ✨\n\nSilakan kirim pesan. Ketik /next, /report, atau /stop.", parse_mode="Markdown")
+        genders = ["Pria 👨", "Wanita 👩"]
+        gender_user = random.choice(genders)
+        gender_partner = "Pria 👨" if gender_user == "Wanita 👩" else "Wanita 👩"
+
+        user_tg = update.effective_user
+        _, country_user_str = get_country_info(user_tg)
+
         try:
-            await context.bot.send_message(chat_id=partner_id, text="✨ **Pasangan Anonim Ditemukan!** ✨\n\nSilakan kirim pesan. Ketik /next, /report, atau /stop.", parse_mode="Markdown")
+            partner_chat_member = await context.bot.get_chat(partner_id)
+            _, country_partner_str = get_country_info(partner_chat_member)
+        except Exception:
+            country_partner_str = "Indonesia 🇮🇩"
+
+        admin_notice = GLOBAL_DB.get("admin_broadcast_text", "🚀 Selamat datang di Anonymeet! Nikmati obrolan santai, jaga kesopanan, dan hormati privasi sesama pengguna.")
+
+        match_text_1 = (
+            f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
+            f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+            f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
+            f"• Gender Partner:\n`{gender_partner}`\n\n"
+            f"• Asal:\n`{country_partner_str}`\n\n"
+            f"💬 Silakan kirim pesan. Ketik /next, /report, atau /stop."
+        )
+
+        match_text_2 = (
+            f"✨ **Pasangan Anonim Ditemukan!** ✨\n\n"
+            f"📢 **Pesan dari Admin:**\n> *{admin_notice}*\n\n"
+            f"🔒 **Privasi Terjaga:** Tidak ada nama asli atau ID Telegram yang ditampilkan.\n"
+            f"• Gender Partner:\n`{gender_user}`\n\n"
+            f"• Asal:\n`{country_user_str}`\n\n"
+            f"💬 Silakan kirim pesan. Ketik /next, /report, atau /stop."
+        )
+
+        await chat_obj.reply_text(match_text_1, parse_mode="Markdown")
+        try:
+            await context.bot.send_message(chat_id=partner_id, text=match_text_2, parse_mode="Markdown")
         except Exception:
             pass
     else:
         WAITING_ANONYMOUS_QUEUE.append(user_id)
-        await chat_obj.reply_text("🚀 **Sedang mencari pasangan anonim...** Mohon tunggu beberapa saat.", parse_mode="Markdown")
+        admin_notice = GLOBAL_DB.get("admin_broadcast_text", "🚀 Selamat datang di Anonymeet! Nikmati obrolan santai, jaga kesopanan, dan hormati privasi sesama pengguna.")
+        await chat_obj.reply_text(
+            f"🚀 **Sedang mencari pasangan anonim...**\n\n"
+            f"📢 **Info Admin:** *{admin_notice}*\n\n"
+            "Mohon tunggu beberapa saat.",
+            parse_mode="Markdown"
+        )
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -473,7 +418,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("Silakan gunakan tombol menu atau ketik /start.")
 
 async def post_init(application: Application) -> None:
-    asyncio.create_task(start_websocket_server())
     await application.bot.set_my_commands([
         BotCommand("start", "Menu Utama"),
         BotCommand("menu", "Tampilkan Menu"),
@@ -486,7 +430,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🤖 BOT & WEBSOCKET SIGNALLING SERVER BERJALAN LENGKAP!")
+    print("🤖 BOT BERJALAN SEMPURNA!")
     app.run_polling()
 
 if __name__ == "__main__":
